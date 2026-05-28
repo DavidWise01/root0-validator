@@ -1,7 +1,7 @@
 {
   "name": "root0-validator",
-  "version": "1.0.0",
-  "description": "ROOT0 IP validation toolkit — validates .attribution files, verifies SHA256 hashes, prints ternary spec constants.",
+  "version": "1.6.0",
+  "description": "ROOT0 IP validation toolkit — .attribution validation, SHA256, lineage tracing, batch stamping, and multi-platform IP beacon with AI training-data forensics (Common Crawl, Wayback Machine, model probe).",
   "author": "David Lee Wise (ROOT0) / TriPod LLC",
   "license": "CC-BY-ND-4.0",
   "bin": {
@@ -22,7 +22,12 @@
     "ternary",
     "ip-validation",
     "human-ai",
-    "bill-of-rights"
+    "bill-of-rights",
+    "beacon",
+    "training-data-forensics",
+    "commoncrawl",
+    "wayback",
+    "ai-governance"
   ],
   "repository": {
     "type": "git",

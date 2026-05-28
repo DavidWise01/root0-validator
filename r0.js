@@ -19,6 +19,10 @@
 //   r0 stamp [dir]               non-interactive .attribution stamp from profile
 //   r0 stamp --all [root]        batch stamp all missing repos in a tree
 //   r0 stamp --setup             create / update ~/.r0-profile.json
+//   r0 beacon                    search for your content across GitHub/Kindle/USCO/Reddit/TDCommons
+//   r0 beacon --term <term>      add extra search term
+//   r0 beacon --platform <name>  search a single platform only
+//   r0 beacon --save             save full report to ~/.r0-beacon-report.json
 //   r0 whoami                    print ROOT0 framework identity
 //   r0 help                      show this help
 
@@ -37,7 +41,9 @@ const { registerHash, listRegistry, REGISTRY_PATH } = require('./lib/register');
 const { runAudit }                                  = require('./lib/audit');
 const { buildChain, buildLocalChain, isCertified, resolveFramework } = require('./lib/lineage');
 const { loadProfile, saveProfile, ensureProfile, buildAttribution,
-        stampDir, stampAll, PROFILE_PATH, DEFAULT_PROFILE } = require('./lib/stamp');
+        stampDir, stampAll, pushAll, PROFILE_PATH, DEFAULT_PROFILE } = require('./lib/stamp');
+const { runBeacon, checkASINs, REPORT_PATH,
+        searchCommonCrawl, searchWayback, probeModels, STOICHEION_PROBES } = require('./lib/beacon');
 
 // ── ANSI colours (graceful fallback if not a TTY) ─────────────────────────
 const isTTY = process.stdout.isTTY;
@@ -812,6 +818,7 @@ async function cmdLineage(target, rawFlags) {
 async function cmdStamp(rawArgs) {
   const allMode   = rawArgs.includes('--all');
   const setupMode = rawArgs.includes('--setup');
+  const pushMode  = rawArgs.includes('--push');
   const dryRun    = rawArgs.includes('--dry-run');
   const ctxIdx    = rawArgs.indexOf('--context');
   const ctxOverride = ctxIdx >= 0 ? rawArgs[ctxIdx + 1] : null;
@@ -947,6 +954,46 @@ async function cmdStamp(rawArgs) {
     return;
   }
 
+  // ── --push mode — commit + push .attribution for all git repos in tree ───
+  if (pushMode) {
+    const root = path.resolve(target || '.');
+    header(`r0 stamp --push  ${root}`);
+    console.log();
+    console.log(c.dim('  Scanning for git repos with .attribution to push...'));
+    console.log();
+
+    const { pushed, skipped } = pushAll(root);
+
+    pushed.forEach(r => {
+      console.log(`${PASS}  ${r.name.padEnd(46)} ${c.mint(`[pushed → ${r.branch}]`)}`);
+    });
+    skipped.forEach(r => {
+      const reason = r.reason;
+      if (reason === 'not a git repo' || reason === 'no remote') return; // silent
+      if (reason === 'nothing to commit (already pushed)') {
+        console.log(`${c.dim('·')}   ${r.name.padEnd(46)} ${c.dim('[already pushed]')}`);
+      } else {
+        console.log(`${WARN}  ${r.name.padEnd(46)} ${c.gold('[skipped]')} ${c.dim(reason)}`);
+      }
+    });
+
+    console.log();
+    rule();
+    console.log(`  Pushed:  ${c.mint(String(pushed.length))}`);
+    const alreadyDone = skipped.filter(s => s.reason === 'nothing to commit (already pushed)').length;
+    if (alreadyDone) console.log(`  Already: ${c.dim(String(alreadyDone))}`);
+    const warned = skipped.filter(s => s.reason !== 'not a git repo' && s.reason !== 'no remote' && s.reason !== 'nothing to commit (already pushed)').length;
+    if (warned) console.log(`  Skipped: ${c.gold(String(warned))}`);
+    console.log();
+
+    if (pushed.length > 0) {
+      console.log(c.dim('  Next: r0 audit DavidWise01 — watch the scoreboard'));
+    }
+    console.log();
+    process.exit(0);
+    return;
+  }
+
   // ── Single dir mode ───────────────────────────────────────────────────────
   const dir = path.resolve(target || '.');
   const projectName = path.basename(dir);
@@ -1041,11 +1088,12 @@ async function cmdAudit(rawArgs) {
   if (!includeForks)    results = results.filter(r => !r.fork);
   if (!includeArchived) results = results.filter(r => !r.archived);
 
-  const covered = results.filter(r => r.found && r.valid).length;
-  const invalid = results.filter(r => r.found && !r.valid).length;
-  const missing = results.filter(r => !r.found).length;
-  const total   = results.length;
-  const pct     = total > 0 ? Math.round((covered / total) * 100) : 0;
+  const covered   = results.filter(r => r.found && r.valid).length;
+  const invalid   = results.filter(r => r.found && !r.valid).length;
+  const missing   = results.filter(r => !r.found).length;
+  const total     = results.length;
+  const pct       = total > 0 ? Math.round((covered / total) * 100) : 0;
+  const certified = results.filter(r => r.found && r.valid && r.certified).length;
 
   // ── JSON output ──────────────────────────────────────────────────────────
   if (jsonMode) {
@@ -1185,6 +1233,364 @@ function cmdRegister(sha, name, ...notes) {
   console.log();
 }
 
+// ── beacon ────────────────────────────────────────────────────────────────
+
+async function cmdBeacon(rawArgs) {
+  const jsonMode   = rawArgs.includes('--json');
+  const saveMode   = rawArgs.includes('--save');
+  const platFlag   = rawArgs.indexOf('--platform');
+  const termFlags  = [];
+  const redditFlag = rawArgs.indexOf('--reddit');
+  const tokenFlag  = rawArgs.indexOf('--token');
+
+  // Probe flags — model behavioral fingerprinting
+  const probeTypeFlag     = rawArgs.indexOf('--probe-type');     // anthropic|openai|generic
+  const probeKeyFlag      = rawArgs.indexOf('--probe-key');      // API key
+  const probeModelFlag    = rawArgs.indexOf('--probe-model');    // model id
+  const probeEndptFlag    = rawArgs.indexOf('--probe-endpoint'); // for generic
+
+  // Collect --term values
+  rawArgs.forEach((a, i) => {
+    if (a === '--term' && rawArgs[i + 1]) termFlags.push(rawArgs[i + 1]);
+  });
+
+  const singlePlatform = platFlag >= 0 ? rawArgs[platFlag + 1] : null;
+  const platforms = singlePlatform
+    ? [singlePlatform]
+    : ['github', 'kindle', 'usco', 'reddit', 'tdcommons',
+       'commoncrawl', 'wayback', 'probe'];
+
+  const redditUser = redditFlag >= 0 ? rawArgs[redditFlag + 1] : null;
+  const token      = tokenFlag  >= 0 ? rawArgs[tokenFlag  + 1] : process.env.GITHUB_TOKEN;
+
+  // Build probe API config from flags / env
+  const probeApis = [];
+  const probeType = probeTypeFlag >= 0
+    ? rawArgs[probeTypeFlag + 1]
+    : (process.env.OPENAI_API_KEY ? 'openai' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : null);
+  const probeKey  = probeKeyFlag >= 0
+    ? rawArgs[probeKeyFlag + 1]
+    : (process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || null);
+  const probeModel = probeModelFlag >= 0 ? rawArgs[probeModelFlag + 1] : null;
+  const probeEndpt = probeEndptFlag >= 0 ? rawArgs[probeEndptFlag + 1] : null;
+
+  if (probeType && probeKey) {
+    probeApis.push({
+      type:     probeType,
+      key:      probeKey,
+      model:    probeModel || (probeType === 'anthropic' ? 'claude-opus-4-5' : 'gpt-4o'),
+      endpoint: probeEndpt,
+    });
+  }
+
+  // Load profile for default terms
+  const profile = loadProfile();
+  const profileTerms = [];
+
+  if (profile?.beacon?.terms?.length) {
+    profileTerms.push(...profile.beacon.terms);
+  } else {
+    if (profile?.human?.name)   profileTerms.push(profile.human.name);
+    if (profile?.human?.handle) profileTerms.push(profile.human.handle);
+    if (profile?.defaults?.framework) {
+      const fw = profile.defaults.framework.split(' ')[0];
+      if (fw) profileTerms.push(fw);
+    }
+  }
+
+  const redditFromProfile = profile?.beacon?.reddit_user || profile?.human?.handle?.toLowerCase();
+
+  const terms = [...new Set([...profileTerms, ...termFlags])].filter(Boolean);
+  if (terms.length === 0) terms.push('ROOT0', 'STOICHEION', 'David Lee Wise');
+
+  // Build crawl URL patterns from profile (for CC + Wayback)
+  // github_user is the actual GitHub username (DavidWise01), distinct from the brand handle (ROOT0)
+  const ownUser    = profile?.human?.handle || 'ROOT0';
+  const githubUser = profile?.human?.github_user || profile?.human?.handle || 'DavidWise01';
+  const crawlUrls = [
+    `github.com/${githubUser}/*`,
+    `raw.githubusercontent.com/${githubUser}/*`,
+  ];
+  if (profile?.beacon?.td_commons_url) {
+    try {
+      const host = new URL(profile.beacon.td_commons_url).hostname;
+      crawlUrls.push(`${host}/*`);
+      // Also add known STOICHEION submission page directly (via DOI redirect)
+      const stoicheionWork = (profile?.beacon?.known_works || []).find(w => w.doi);
+      if (stoicheionWork?.doi) {
+        // DOI resolves through doi.org to TD Commons — check both
+        const doiPath = stoicheionWork.doi.replace('10.5281/zenodo.', '');
+        crawlUrls.push(`doi.org/${stoicheionWork.doi}`);
+        crawlUrls.push(`zenodo.org/records/${doiPath}`);
+      }
+    } catch {}
+  }
+  // Reddit profile — use exact URL (no /* wildcard) so matchType=exact avoids false positives
+  // from other users whose names start with ROOT0
+  if (profile?.beacon?.reddit_user) {
+    const ru = profile.beacon.reddit_user;
+    crawlUrls.push(`www.reddit.com/user/${ru}`);
+    crawlUrls.push(`www.reddit.com/user/${ru}/`);
+    crawlUrls.push(`www.reddit.com/user/${ru}/submitted`);
+  }
+  // Amazon author page
+  crawlUrls.push('amazon.com/David-Wise/e/B0H2T5M1T5');
+  // Amazon book pages — add all books that may predate the training cutoff.
+  // Heuristic: ASINs starting with B0D*, B0F*, B0G* were published before B0H* (2026-05+).
+  // Also include books with explicit prior_art dates.
+  const CUTOFF = '2026-02-05';
+  const allWorks = (profile?.beacon?.known_works || []).filter(w => w.asin);
+  const preCutoffWorks = allWorks.filter(w =>
+    (w.prior_art && w.prior_art <= CUTOFF) ||
+    /^B0[DF]/.test(w.asin) ||   // B0D* and B0F* ASINs are definitively older
+    (w.asin.startsWith('B0G') && !w.asin.startsWith('B0GN') && !w.asin.startsWith('B0GV') && !w.asin.startsWith('B0GW'))
+  );
+  const works = preCutoffWorks.length > 0 ? preCutoffWorks : allWorks.slice(0, 8);
+  works.forEach(w => crawlUrls.push(`amazon.com/dp/${w.asin}`));
+
+  if (!jsonMode) {
+    header('r0 beacon');
+    console.log();
+    console.log(c.dim('  Search terms: ') + terms.map(t => c.gold(t)).join(c.dim(', ')));
+    console.log(c.dim('  Platforms:    ') + platforms.map(p => c.cyan(p)).join(c.dim(', ')));
+    if (probeApis.length) {
+      console.log(c.dim('  Probe model:  ') + c.gold(`${probeApis[0].type}/${probeApis[0].model}`));
+    }
+    console.log();
+    console.log(c.dim('  Scanning the web for your content...\n'));
+  }
+
+  const PLATFORM_LABELS = {
+    github:      'GitHub',
+    kindle:      'Kindle',
+    usco:        'USCO',
+    reddit:      'Reddit',
+    tdcommons:   'TD Commons',
+    commoncrawl: 'Common Crawl',
+    wayback:     'Wayback Machine',
+    probe:       'Model Probe',
+  };
+
+  const TYPE_ICONS = {
+    repo:             '⬡',
+    code:             '◈',
+    ebook:            '◉',
+    'asin-check':     '◉',
+    copyright:        '©',
+    post:             '▲',
+    'own-post':       '▲',
+    comment:          '◆',
+    document:         '◉',
+    'crawl-record':   '⬡',
+    'archive-capture':'⬡',
+    'model-probe':    '◈',
+  };
+
+  // Run ASIN direct checks first (from known_works in profile)
+  const knownWorks  = profile?.beacon?.known_works || [];
+  const asinResults = knownWorks.length > 0 ? await checkASINs(knownWorks) : [];
+
+  const report = await runBeacon({
+    terms,
+    token,
+    ownUser: githubUser,
+    redditUser:   redditUser || redditFromProfile,
+    tdCommonsUrl: profile?.beacon?.td_commons_url || 'https://tdcommons.org',
+    platforms,
+    crawlUrls,
+    cutoffDate:   '20260205',
+    waybackFrom:  '20240101',
+    probeApis,
+    onProgress: name => {
+      if (!jsonMode) process.stdout.write(c.dim(`  → scanning ${PLATFORM_LABELS[name] || name}...\n`));
+    },
+  });
+
+  if (jsonMode) {
+    console.log(JSON.stringify({ asinResults, ...report }, null, 2));
+    process.exit(0);
+    return;
+  }
+
+  console.log();
+
+  let totalHits = 0;
+
+  // ── Known works / ASIN status ────────────────────────────────────────────
+  if (asinResults.length > 0) {
+    rule();
+    console.log(`  ${c.cyan(c.bold('Known Works'.padEnd(14)))} ${c.dim('direct ASIN check')}`);
+    console.log();
+    asinResults.forEach(h => {
+      const status  = h.live === true  ? c.mint('[LIVE ✓]')
+                    : h.live === false ? c.red('[DOWN ✗]')
+                    : c.dim('[unknown]');
+      const price   = h.price ? c.dim(` ${h.price}`) : '';
+      const asinStr = c.dim(` ASIN:${h.asin}`);
+      console.log(`  ${c.mint('◉')}  ${h.title.slice(0, 65)}${price}  ${status}${asinStr}`);
+      console.log(`     ${c.dim(h.url)}`);
+    });
+    console.log();
+  }
+
+  for (const plat of platforms) {
+    const hits  = report.byPlatform[plat] || [];
+    const label = PLATFORM_LABELS[plat] || plat;
+    rule();
+
+    // ── Common Crawl display ─────────────────────────────────────────────
+    if (plat === 'commoncrawl') {
+      console.log(`  ${c.cyan(c.bold(label.padEnd(14)))} ${c.dim(`${hits.length} crawl record${hits.length !== 1 ? 's' : ''} before 2026-02-05`)}`);
+      console.log();
+      if (hits.length === 0) {
+        console.log(c.dim('  · No records found in CC index for scanned URLs'));
+        console.log(c.dim('  · GitHub and Amazon block Common Crawl via robots.txt'));
+        console.log(c.dim('  · Zero CC hits = only purpose-built API scrapers could have ingested this content'));
+        console.log(c.dim('    (GitHub API + KDP data pipeline — not a public crawl)'));
+      } else {
+        hits.forEach(h => {
+          const crawl  = c.dim(` [${h.crawlIndex}]`);
+          const date   = h.date ? c.mint(` crawled:${h.date}`) : '';
+          const status = h.status === '200' ? c.mint(' ✓') : c.dim(` HTTP:${h.status}`);
+          console.log(`  ${c.gold('⬡')}  ${(h.title || h.url).slice(0, 70)}${status}${date}${crawl}`);
+        });
+        console.log();
+        console.log(c.red(`  ⚠  ${hits.length} record(s) confirm public CC indexing before Opus 4.6 training cutoff`));
+        console.log(c.red('     → Content was in the open web crawl — direct training data exposure'));
+      }
+      totalHits += hits.length;
+      console.log();
+      continue;
+    }
+
+    // ── Wayback Machine display ──────────────────────────────────────────
+    if (plat === 'wayback') {
+      console.log(`  ${c.cyan(c.bold(label.padEnd(14)))} ${c.dim(`${hits.length} archive capture${hits.length !== 1 ? 's' : ''} (2024-01-01 → 2026-02-05)`)}`);
+      console.log();
+      if (hits.length === 0) {
+        console.log(c.dim('  · No Wayback captures found in the target date window'));
+      } else {
+        // Group by original URL, show earliest + latest
+        const byUrl = {};
+        hits.forEach(h => {
+          if (!byUrl[h.original]) byUrl[h.original] = [];
+          byUrl[h.original].push(h.date);
+        });
+        const TRAINING_CUTOFF = '2026-02-05';
+        let precountWB = 0;
+        Object.entries(byUrl).forEach(([url, dates]) => {
+          dates.sort();
+          const firstDate  = dates[0];
+          const earliest   = c.mint(firstDate);
+          const count      = c.dim(` (${dates.length} capture${dates.length !== 1 ? 's' : ''})`);
+          const preTraining = firstDate <= TRAINING_CUTOFF;
+          if (preTraining) precountWB++;
+          const tag = preTraining
+            ? c.red(' ◀ BEFORE TRAINING CUTOFF')
+            : c.dim(' (post-cutoff)');
+          console.log(`  ${c.gold('⬡')}  ${url.slice(0, 70)}`);
+          console.log(`     ${c.dim('First captured:')} ${earliest}${count}${tag}`);
+        });
+        console.log();
+        if (precountWB > 0) {
+          console.log(c.red(`  ⚠  ${precountWB} URL(s) publicly accessible BEFORE 2026-02-05 training cutoff`));
+          console.log(c.red(`     → Wayback confirms content was scrapable during training window`));
+        } else {
+          console.log(c.gold(`  ⚠  Content was publicly accessible — Wayback confirms scraping window`));
+        }
+      }
+      totalHits += hits.length;
+      console.log();
+      continue;
+    }
+
+    // ── Model Probe display ──────────────────────────────────────────────
+    if (plat === 'probe') {
+      if (hits.length === 0) {
+        console.log(`  ${c.cyan(c.bold(label.padEnd(14)))} ${c.dim('no API configured')}`);
+        console.log();
+        console.log(c.dim('  To enable: r0 beacon --probe-type openai --probe-key <key>'));
+        console.log(c.dim('             r0 beacon --probe-type anthropic --probe-key <key>'));
+        console.log(c.dim('  Or set OPENAI_API_KEY / ANTHROPIC_API_KEY in environment'));
+        console.log();
+        continue;
+      }
+      const familiar = hits.filter(h => h.familiar).length;
+      const total    = hits.length;
+      const verdict  = familiar >= 3
+        ? c.red(`FAMILIAR (${familiar}/${total} probes matched) ⚠  TRAINING DATA EXPOSURE LIKELY`)
+        : familiar >= 1
+        ? c.gold(`PARTIAL (${familiar}/${total} probes matched) — investigate`)
+        : c.mint(`UNKNOWN (${familiar}/${total}) — no exposure detected`);
+
+      console.log(`  ${c.cyan(c.bold(label.padEnd(14)))} ${verdict}`);
+      console.log();
+
+      hits.forEach(h => {
+        const scoreBar = h.maxScore > 0
+          ? `${h.score}/${h.maxScore}`
+          : '0/0';
+        const famFlag  = h.familiar ? c.red(' [FAMILIAR]') : c.dim(' [unknown]');
+        const matched  = h.keywordsMatched?.length
+          ? c.dim(`   matched: ${h.keywordsMatched.join(', ')}`)
+          : '';
+        const missed   = h.keywordsMissed?.length
+          ? c.dim(`   missed:  ${h.keywordsMissed.join(', ')}`)
+          : '';
+        console.log(`  ${c.gold('◈')}  [${h.model}] ${h.probeId} — ${scoreBar} keywords${famFlag}`);
+        if (matched) console.log(`     ${matched}`);
+        if (missed)  console.log(`     ${missed}`);
+        if (h.error)  console.log(`     ${c.red(`error: ${h.error}`)}`);
+      });
+      totalHits += familiar;
+      console.log();
+      continue;
+    }
+
+    // ── Standard platform display ────────────────────────────────────────
+    console.log(`  ${c.cyan(c.bold(label.padEnd(14)))} ${c.dim(`${hits.length} hit${hits.length !== 1 ? 's' : ''}`)}`);
+    console.log();
+
+    if (hits.length === 0) {
+      console.log(c.dim('  · No results found'));
+    } else {
+      hits.forEach(h => {
+        const icon  = TYPE_ICONS[h.type] || '·';
+        const date  = h.date ? c.dim(` [${h.date}]`) : '';
+        const score = h.score != null ? c.dim(` ↑${h.score}`) : '';
+        const sub   = h.subreddit ? c.dim(` ${h.subreddit}`) : '';
+        const stars = h.stars != null ? c.dim(` ★${h.stars}`) : '';
+        const reg   = h.regNumber ? c.gold(` [${h.regNumber}]`) : '';
+        const own   = h.own === false ? c.gold(' [external]') : '';
+        const term  = c.dim(` «${h.term}»`);
+        console.log(`  ${c.mint(icon)}  ${h.title.slice(0, 70)}${own}${reg}${stars}${score}${sub}${date}${term}`);
+        if (h.url) console.log(`     ${c.dim(h.url.slice(0, 90))}`);
+      });
+      totalHits += hits.length;
+    }
+    console.log();
+  }
+
+  rule();
+  console.log(`  Total hits: ${c.mint(String(totalHits))} across ${c.cyan(String(platforms.length))} platforms`);
+  console.log(`  Terms searched: ${terms.map(t => c.gold(t)).join(', ')}`);
+  console.log();
+
+  if (saveMode) {
+    const outPath = REPORT_PATH;
+    fs.writeFileSync(outPath, JSON.stringify({ asinResults, ...report }, null, 2) + '\n', 'utf8');
+    console.log(c.dim(`  Report saved → ${outPath}`));
+    console.log();
+  }
+
+  if (!saveMode && totalHits > 0) {
+    console.log(c.dim('  Tip: run r0 beacon --save to persist this report'));
+    console.log();
+  }
+
+  process.exit(0);
+}
+
 // ── MAIN ──────────────────────────────────────────────────────────────────
 
 const [,, cmd, ...args] = process.argv;
@@ -1203,6 +1609,7 @@ switch (cmd) {
   case 'audit':     cmdAudit(args);                            break;
   case 'lineage':   cmdLineage(args[0], args.slice(1));        break;
   case 'stamp':     cmdStamp(args);                            break;
+  case 'beacon':    cmdBeacon(args);                           break;
   case 'help':
   case '--help':
   case '-h':        cmdHelp();                                 break;
