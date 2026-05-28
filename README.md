@@ -1,7 +1,7 @@
 # root0-validator
 
 **Author:** David Lee Wise (ROOT0) / TriPod LLC  
-**Version:** 1.4.0  
+**Version:** 1.5.0  
 **License:** CC-BY-ND-4.0 · TRIPOD-IP-v1.1  
 **No dependencies** — Node.js built-ins only.
 
@@ -20,6 +20,9 @@ r0 badge [dir]                 → generate attribution badge for a project
 r0 register <sha> <name>       → register a known hash to ~/.r0-registry.json
 r0 audit [username]            → GitHub attribution coverage report
 r0 lineage [dir] [--follow]   → trace provenance chain → ROOT0 foundation
+r0 stamp [dir]                → non-interactive .attribution from profile
+r0 stamp --all [root]         → batch stamp all missing repos in a tree
+r0 stamp --setup              → create / update ~/.r0-profile.json (one-time)
 ```
 
 ---
@@ -342,11 +345,41 @@ my-project · ROOT0-ATTRIBUTION-v1.0
 
 ---
 
+### `r0 stamp` — batch attribution stamper
+
+The fastest path from 0 to full coverage. Set up your profile once, then stamp every repo with a single command.
+
+```bash
+# Step 1 — one-time setup (~60 seconds)
+r0 stamp --setup
+
+# Step 2 — preview what would be stamped
+r0 stamp --all "C:/my-projects" --dry-run
+
+# Step 3 — write .attribution to all missing repos
+r0 stamp --all "C:/my-projects"
+
+# Step 4 — verify
+r0 audit
+```
+
+The profile is stored at `~/.r0-profile.json` and contains your name, handle, role, AI contributor defaults, license, framework, and context. Every stamped file gets `"framework": "STOICHEION v11.0"` automatically, making it immediately lineage-certified.
+
+Stamp a single repo without prompts:
+```bash
+r0 stamp ./my-project
+r0 stamp ./my-project --context research
+```
+
+`r0 audit` now shows the full onboarding sequence when coverage is 0, guiding you straight to `r0 stamp --setup`.
+
+---
+
 ## Tests
 
 ```bash
 node test.js
-# 93 tests passed
+# 106 tests passed
 ```
 
 ---

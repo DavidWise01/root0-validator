@@ -15,6 +15,8 @@ const { parseAttributionResponse, runBatch }        = require('./lib/audit');
 const { buildLocalChain, isCertified, resolveFramework,
         extractGitHubCoords, KNOWN_FRAMEWORKS }     = require('./lib/lineage');
 const { lineageAsciiBadge, lineageMarkdownBadge }   = require('./lib/badge');
+const { loadProfile, saveProfile, buildAttribution,
+        stampDir, stampAll, DEFAULT_PROFILE }       = require('./lib/stamp');
 const { markdownBadge, htmlBadge, asciiBadge, summariseBadge } = require('./lib/badge');
 const { registerHash, loadUserRegistry, removeHash, REGISTRY_PATH } = require('./lib/register');
 
@@ -730,6 +732,135 @@ test('validateAttribution: empty parent raises warning not error', () => {
   const r = validateAttribution({ ...VALID_ATTR, parent: '' });
   assert(r.valid === true, 'should still be valid');
   assert(r.warnings.some(w => w.includes('parent')));
+});
+
+// ── Stamp tests ───────────────────────────────────────────────────────────
+
+test('buildAttribution: produces valid attribution object', () => {
+  const obj = buildAttribution('my-repo', DEFAULT_PROFILE);
+  const { valid, errors } = validateAttribution(obj);
+  assert(valid, `should be valid — ${errors.join(', ')}`);
+  assert(obj.project      === 'my-repo');
+  assert(obj.framework    === 'STOICHEION v11.0');
+  assert(obj.law          === 'Both work. Both fair.');
+  assert(obj.contributors.length === 2);
+});
+
+test('buildAttribution: human contributor has correct substrate', () => {
+  const obj = buildAttribution('test', DEFAULT_PROFILE);
+  const human = obj.contributors.find(c => c.substrate === 'human');
+  assert(human, 'human contributor missing');
+  assert(human.name === 'David Lee Wise');
+  assert(human.role === 'architect');
+});
+
+test('buildAttribution: ai contributor has provider and model', () => {
+  const obj = buildAttribution('test', DEFAULT_PROFILE);
+  const ai  = obj.contributors.find(c => c.substrate === 'synthetic');
+  assert(ai, 'ai contributor missing');
+  assert(ai.provider === 'Anthropic');
+  assert(ai.model    === 'Claude Sonnet 4.6');
+});
+
+test('buildAttribution: overrides applied', () => {
+  const obj = buildAttribution('test', DEFAULT_PROFILE, { project: 'override-name', context: 'research' });
+  assert(obj.project === 'override-name');
+  assert(obj.context === 'research');
+});
+
+test('buildAttribution: no AI when profile.ai is null', () => {
+  const profileNoAI = { ...DEFAULT_PROFILE, ai: null };
+  const obj = buildAttribution('test', profileNoAI);
+  assert(obj.contributors.length === 1, 'should only have human');
+  assert(obj.contributors[0].substrate === 'human');
+});
+
+test('buildAttribution: date is today (YYYY-MM-DD)', () => {
+  const obj = buildAttribution('test', DEFAULT_PROFILE);
+  assert(/^\d{4}-\d{2}-\d{2}$/.test(obj.date), `bad date: ${obj.date}`);
+});
+
+test('stampDir: writes .attribution file', () => {
+  withTempDir(dir => {
+    const result = stampDir(dir, DEFAULT_PROFILE);
+    assert(result.stamped === true, 'should be stamped');
+    assert(fs.existsSync(path.join(dir, '.attribution')), 'file should exist');
+    const written = JSON.parse(fs.readFileSync(path.join(dir, '.attribution'), 'utf8'));
+    assert(written.project === path.basename(dir));
+    assert(written.framework === 'STOICHEION v11.0');
+  });
+});
+
+test('stampDir: skips if .attribution already exists', () => {
+  withTempDir(dir => {
+    fs.writeFileSync(path.join(dir, '.attribution'), '{}', 'utf8');
+    const result = stampDir(dir, DEFAULT_PROFILE);
+    assert(result.skipped === true);
+    assert(result.reason  === 'already exists');
+  });
+});
+
+test('stampDir: written file passes validateAttribution', () => {
+  withTempDir(dir => {
+    stampDir(dir, DEFAULT_PROFILE);
+    const obj = JSON.parse(fs.readFileSync(path.join(dir, '.attribution'), 'utf8'));
+    const { valid, errors } = validateAttribution(obj);
+    assert(valid, `should be valid — ${errors.join(', ')}`);
+  });
+});
+
+test('stampDir: written file is lineage-certified', () => {
+  withTempDir(dir => {
+    stampDir(dir, DEFAULT_PROFILE);
+    const obj   = JSON.parse(fs.readFileSync(path.join(dir, '.attribution'), 'utf8'));
+    const chain = buildLocalChain(obj);
+    assert(isCertified(chain), 'should be lineage certified');
+  });
+});
+
+test('stampAll: stamps missing project dirs', () => {
+  withTempDir(rootDir => {
+    // Create two projects missing .attribution
+    const proj1 = path.join(rootDir, 'proj-one');
+    const proj2 = path.join(rootDir, 'proj-two');
+    fs.mkdirSync(proj1);
+    fs.mkdirSync(proj2);
+    fs.writeFileSync(path.join(proj1, 'package.json'), '{}');
+    fs.writeFileSync(path.join(proj2, 'package.json'), '{}');
+
+    const r = stampAll(rootDir, DEFAULT_PROFILE);
+    assert(r.stamped.length === 2, `expected 2 stamped, got ${r.stamped.length}`);
+    assert(r.errors.length  === 0, 'should have no errors');
+    assert(fs.existsSync(path.join(proj1, '.attribution')));
+    assert(fs.existsSync(path.join(proj2, '.attribution')));
+  });
+});
+
+test('stampAll: dry-run does not write files', () => {
+  withTempDir(rootDir => {
+    const proj = path.join(rootDir, 'dry-proj');
+    fs.mkdirSync(proj);
+    fs.writeFileSync(path.join(proj, 'package.json'), '{}');
+
+    const r = stampAll(rootDir, DEFAULT_PROFILE, { dryRun: true });
+    assert(r.stamped.length === 1, 'should report 1 would-stamp');
+    assert(!fs.existsSync(path.join(proj, '.attribution')), 'should NOT write file in dry-run');
+  });
+});
+
+test('stampAll: skips repos that already have .attribution', () => {
+  withTempDir(rootDir => {
+    const proj = path.join(rootDir, 'existing-proj');
+    fs.mkdirSync(proj);
+    fs.writeFileSync(path.join(proj, 'package.json'), '{}');
+    // Pre-create .attribution
+    const obj = buildAttribution(path.basename(proj), DEFAULT_PROFILE);
+    fs.writeFileSync(path.join(proj, '.attribution'), JSON.stringify(obj));
+
+    const r = stampAll(rootDir, DEFAULT_PROFILE);
+    assert(r.stamped.length === 0, 'nothing to stamp');
+    assert(r.skipped.length === 1, 'one already attributed');
+  });
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────

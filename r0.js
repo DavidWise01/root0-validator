@@ -16,6 +16,9 @@
 //   r0 register <sha> <name>     register a known hash to ~/.r0-registry.json
 //   r0 audit [username]          GitHub attribution coverage report
 //   r0 lineage [dir|file]        trace provenance chain → ROOT0 foundation
+//   r0 stamp [dir]               non-interactive .attribution stamp from profile
+//   r0 stamp --all [root]        batch stamp all missing repos in a tree
+//   r0 stamp --setup             create / update ~/.r0-profile.json
 //   r0 whoami                    print ROOT0 framework identity
 //   r0 help                      show this help
 
@@ -33,6 +36,8 @@ const { markdownBadge, htmlBadge, asciiBadge, summariseBadge,
 const { registerHash, listRegistry, REGISTRY_PATH } = require('./lib/register');
 const { runAudit }                                  = require('./lib/audit');
 const { buildChain, buildLocalChain, isCertified, resolveFramework } = require('./lib/lineage');
+const { loadProfile, saveProfile, ensureProfile, buildAttribution,
+        stampDir, stampAll, PROFILE_PATH, DEFAULT_PROFILE } = require('./lib/stamp');
 
 // ── ANSI colours (graceful fallback if not a TTY) ─────────────────────────
 const isTTY = process.stdout.isTTY;
@@ -294,6 +299,9 @@ function cmdHelp() {
   console.log(`  ${c.cyan('r0 register')}  ${c.dim('<sha> <name>')}    register a known hash to ~/.r0-registry.json`);
   console.log(`  ${c.cyan('r0 audit')}     ${c.dim('[username]')}      GitHub attribution coverage report`);
   console.log(`  ${c.cyan('r0 lineage')}   ${c.dim('[dir] [--follow]')} trace provenance chain → ROOT0 foundation`);
+  console.log(`  ${c.cyan('r0 stamp')}     ${c.dim('[dir]')}           stamp .attribution from ~/.r0-profile.json`);
+  console.log(`  ${c.cyan('r0 stamp')}     ${c.dim('--all [root]')}    batch stamp all missing repos in a tree`);
+  console.log(`  ${c.cyan('r0 stamp')}     ${c.dim('--setup')}         create / update profile (one-time)`);
   console.log(`  ${c.cyan('r0 help')}                     show this help`);
   console.log();
   console.log(c.bold('Examples'));
@@ -314,6 +322,10 @@ function cmdHelp() {
   console.log(`  ${c.dim('r0 audit --json > coverage.json')}`);
   console.log(`  ${c.dim('r0 lineage')}`);
   console.log(`  ${c.dim('r0 lineage ./my-project --follow')}`);
+  console.log(`  ${c.dim('r0 stamp --setup')}`);
+  console.log(`  ${c.dim('r0 stamp ./my-project')}`);
+  console.log(`  ${c.dim('r0 stamp --all "C:/Davids files"')}`);
+  console.log(`  ${c.dim('r0 stamp --all "C:/Davids files" --dry-run')}`);
   console.log();
   console.log(c.bold('Exit codes'));
   console.log(`  ${c.mint('0')}  valid / match / covered`);
@@ -796,6 +808,189 @@ async function cmdLineage(target, rawFlags) {
   process.exit(certified ? 0 : 1);
 }
 
+// stamp [dir | --all <root> | --setup] [--dry-run] [--context <ctx>]
+async function cmdStamp(rawArgs) {
+  const allMode   = rawArgs.includes('--all');
+  const setupMode = rawArgs.includes('--setup');
+  const dryRun    = rawArgs.includes('--dry-run');
+  const ctxIdx    = rawArgs.indexOf('--context');
+  const ctxOverride = ctxIdx >= 0 ? rawArgs[ctxIdx + 1] : null;
+
+  // Positional arg: dir (single) or root (--all)
+  const posArgs = rawArgs.filter(a => !a.startsWith('-'));
+  const target  = posArgs[0] || null;
+
+  // ── --setup mode ─────────────────────────────────────────────────────────
+  if (setupMode) {
+    const readline = require('readline');
+    const existing = loadProfile() || DEFAULT_PROFILE;
+
+    header('r0 stamp  profile setup');
+    console.log();
+    console.log(c.dim(`  Profile will be saved to: ${PROFILE_PATH}`));
+    console.log(c.dim('  Press Enter to keep existing values shown in [brackets].'));
+    console.log();
+
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const ask = (q, def) => new Promise(r => rl.question(
+      `  ${q} [${def}]: `, a => r(a.trim() || def)
+    ));
+    const askBool = (q, def = 'y') => new Promise(r => rl.question(
+      `  ${q} (y/n) [${def}]: `, a => r((a.trim().toLowerCase() || def) === 'y')
+    ));
+
+    const h = existing.human   || {};
+    const d = existing.defaults || {};
+    const a = existing.ai      || {};
+
+    console.log(c.dim('  ── Human contributor ──────────────────────────────'));
+    const name         = await ask('Name',         h.name         || 'David Lee Wise');
+    const handle       = await ask('Handle',       h.handle       || 'ROOT0');
+    const role         = await ask('Role',         h.role         || 'architect');
+    const contribution = await ask('Contribution', h.contribution || 'intent · direction · governance');
+
+    console.log();
+    console.log(c.dim('  ── Defaults ────────────────────────────────────────'));
+    const license   = await ask('License',   d.license   || 'CC-BY-ND-4.0');
+    const framework = await ask('Framework', d.framework || 'STOICHEION v11.0');
+    const context   = await ask('Context',   d.context   || 'code');
+
+    console.log();
+    const includeAI = await askBool('Include AI contributor by default?', 'y');
+    let aiConfig = null;
+    if (includeAI) {
+      console.log(c.dim('  ── AI contributor ──────────────────────────────────'));
+      const aiName     = await ask('Name',     a.name     || 'AVAN');
+      const aiProvider = await ask('Provider', a.provider || 'Anthropic');
+      const aiModel    = await ask('Model',    a.model    || 'Claude Sonnet 4.6');
+      const aiRole     = await ask('Role',     a.role     || 'co-author');
+      const aiContrib  = await ask('Contribution', a.contribution || 'intellect · generation · execution');
+      aiConfig = { name: aiName, substrate: 'synthetic', provider: aiProvider, model: aiModel, role: aiRole, contribution: aiContrib };
+    }
+
+    rl.close();
+
+    const profile = {
+      human:    { name, handle, substrate: 'human', role, contribution },
+      ai:       aiConfig,
+      defaults: { license, framework, law: 'Both work. Both fair.', context, version: d.version || 'v1.0' },
+    };
+
+    saveProfile(profile);
+
+    console.log();
+    console.log(c.mint(`  ✓  Profile saved to ${PROFILE_PATH}`));
+    console.log();
+    console.log(c.dim('  Now run:'));
+    console.log(c.dim('    r0 stamp ./my-project          — stamp one repo'));
+    console.log(c.dim('    r0 stamp --all "C:/my-root"    — stamp all missing repos'));
+    console.log();
+    return;
+  }
+
+  // ── Load profile ─────────────────────────────────────────────────────────
+  const profile = ensureProfile();
+  const overrides = ctxOverride ? { context: ctxOverride } : {};
+
+  // ── --all mode — batch stamp entire tree ─────────────────────────────────
+  if (allMode) {
+    const root = path.resolve(target || '.');
+    header(`r0 stamp --all  ${root}`);
+    console.log();
+
+    if (!fs.existsSync(root)) {
+      console.error(c.red(`Error: not found — ${root}`));
+      process.exit(2);
+    }
+
+    if (dryRun) console.log(c.gold('  DRY RUN — no files will be written\n'));
+    console.log(c.dim('  Scanning for projects...'));
+    console.log();
+
+    const { stamped, skipped, errors, total } = stampAll(root, profile, { dryRun, overrides });
+
+    stamped.forEach(r => {
+      const name = r.name.padEnd(46);
+      const tag  = dryRun ? c.gold('[would stamp]') : c.mint('[stamped]');
+      console.log(`${PASS}  ${name} ${tag}`);
+    });
+    skipped.forEach(r => {
+      if (r.reason === 'already has .attribution') {
+        console.log(`${c.dim('·')}   ${r.name.padEnd(46)} ${c.dim('[already attributed]')}`);
+      }
+      // silently skip other skip reasons in batch mode
+    });
+    errors.forEach(r => {
+      console.log(`${FAIL}  ${r.name.padEnd(46)} ${c.red('[error]')} ${c.dim(r.error)}`);
+    });
+
+    console.log();
+    rule();
+
+    const already = skipped.filter(s => s.reason === 'already has .attribution').length;
+    console.log(`  Stamped:  ${c.mint(String(stamped.length))}`);
+    console.log(`  Already:  ${c.dim(String(already))}`);
+    if (errors.length) console.log(`  Errors:   ${c.red(String(errors.length))}`);
+    console.log(`  Total:    ${total} projects`);
+    console.log();
+
+    if (stamped.length > 0 && !dryRun) {
+      console.log(c.dim('  Next: run r0 audit to confirm coverage, then commit the .attribution files.'));
+      console.log(c.dim(`  Tip:  git add \`**/.attribution\` && git commit -m "chore: add .attribution files"`));
+    }
+    if (dryRun && stamped.length > 0) {
+      console.log(c.gold(`  Run without --dry-run to write ${stamped.length} file${stamped.length !== 1 ? 's' : ''}.`));
+    }
+    console.log();
+
+    process.exit(errors.length > 0 ? 1 : 0);
+    return;
+  }
+
+  // ── Single dir mode ───────────────────────────────────────────────────────
+  const dir = path.resolve(target || '.');
+  const projectName = path.basename(dir);
+
+  header(`r0 stamp  ${projectName}`);
+  console.log();
+
+  if (!fs.existsSync(dir)) {
+    console.error(c.red(`Error: not found — ${dir}`));
+    process.exit(2);
+  }
+
+  const result = stampDir(dir, profile, overrides);
+
+  if (result.skipped) {
+    console.log(`${WARN}  ${c.gold('Skipped:')} ${result.reason}`);
+    console.log(c.dim(`  ${result.path}`));
+    if (result.reason === 'already exists') {
+      console.log(c.dim('  Run r0 validate to check it, or r0 lineage to trace its chain.'));
+    }
+    console.log();
+    process.exit(0);
+  }
+
+  console.log(`${PASS}  ${c.mint('.attribution written')}`);
+  console.log(c.dim(`  ${result.path}`));
+  console.log();
+  console.log(c.dim(JSON.stringify(result.obj, null, 2)));
+  console.log();
+
+  // Quick lineage check
+  const { buildLocalChain, isCertified } = require('./lib/lineage');
+  const chain = buildLocalChain(result.obj);
+  if (isCertified(chain)) {
+    console.log(c.mint('  ROOT0 LINEAGE CERTIFIED ✓'));
+    console.log(c.dim('  framework: ' + (result.obj.framework || '') + ' — SHA verified'));
+  }
+  console.log();
+  console.log(c.dim(`  Next: r0 validate ${dir}`));
+  console.log(c.dim(`        r0 lineage  ${dir}`));
+  console.log(c.dim(`        r0 badge    ${dir}`));
+  console.log();
+}
+
 // audit [username] [--token <PAT>] [--json] [--include-forks] [--include-archived]
 async function cmdAudit(rawArgs) {
   // Parse flags out of args
@@ -931,8 +1126,21 @@ async function cmdAudit(rawArgs) {
 
   if (missing > 0) {
     console.log();
-    console.log(c.dim(`  Run r0 init in each missing repo directory to scaffold .attribution files.`));
-    console.log(c.dim(`  Run r0 badge <dir> after to generate README badges.`));
+    if (covered === 0) {
+      // First-time user — give the full onboarding sequence
+      console.log(c.bold('  Next steps:'));
+      console.log(c.dim('  1.  r0 stamp --setup'));
+      console.log(c.dim(`       Create your ~/.r0-profile.json (one-time, 60 seconds)`));
+      console.log(c.dim('  2.  r0 stamp --all <local-root> --dry-run'));
+      console.log(c.dim(`       Preview what would be stamped`));
+      console.log(c.dim('  3.  r0 stamp --all <local-root>'));
+      console.log(c.dim(`       Write .attribution to all ${missing} missing repos`));
+      console.log(c.dim('  4.  r0 audit ' + username));
+      console.log(c.dim(`       Confirm coverage (target: ${total}/${total})`));
+    } else {
+      console.log(c.dim(`  Run r0 stamp <dir> to stamp missing repos, or r0 stamp --all <root> for batch.`));
+      console.log(c.dim(`  Run r0 badge <dir> after to generate README badges.`));
+    }
   }
   console.log();
 
@@ -994,6 +1202,7 @@ switch (cmd) {
   case 'register':  cmdRegister(args[0], args[1], ...args.slice(2)); break;
   case 'audit':     cmdAudit(args);                            break;
   case 'lineage':   cmdLineage(args[0], args.slice(1));        break;
+  case 'stamp':     cmdStamp(args);                            break;
   case 'help':
   case '--help':
   case '-h':        cmdHelp();                                 break;
