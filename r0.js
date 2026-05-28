@@ -5,14 +5,17 @@
 // https://github.com/DavidWise01/root0-validator
 //
 // Usage:
-//   r0 validate <file|dir>    validate .attribution file(s)
-//   r0 sha <file> [hash]      compute or verify SHA256
-//   r0 ternary                print ternary spec constants
-//   r0 init [dir]             scaffold a new .attribution file
-//   r0 scan [dir]             find projects missing .attribution
-//   r0 ladder [n]             doubt ladder analysis
-//   r0 whoami                 print ROOT0 framework identity
-//   r0 help                   show this help
+//   r0 validate <file|dir>       validate .attribution file(s)
+//   r0 sha <file> [hash]         compute or verify SHA256
+//   r0 ternary                   print ternary spec constants
+//   r0 init [dir]                scaffold a new .attribution file
+//   r0 scan [dir]                find projects missing .attribution
+//   r0 ladder [n]                doubt ladder analysis
+//   r0 abd <A> [B] <C>           ABD Law Engine — anchor · witness · law
+//   r0 badge [dir]               generate attribution badge for a project
+//   r0 register <sha> <name>     register a known hash to ~/.r0-registry.json
+//   r0 whoami                    print ROOT0 framework identity
+//   r0 help                      show this help
 
 const fs   = require('fs');
 const path = require('path');
@@ -22,6 +25,9 @@ const { computeSHA256, checkSHA256, KNOWN_HASHES }  = require('./lib/sha');
 const { SPEC, stateCount }                          = require('./lib/ternary');
 const { runInit }                                   = require('./lib/init');
 const { scanDir }                                   = require('./lib/scan');
+const { evaluateABD, tritStr }                      = require('./lib/abd');
+const { markdownBadge, htmlBadge, asciiBadge, summariseBadge } = require('./lib/badge');
+const { registerHash, listRegistry, REGISTRY_PATH } = require('./lib/register');
 
 // ── ANSI colours (graceful fallback if not a TTY) ─────────────────────────
 const isTTY = process.stdout.isTTY;
@@ -268,17 +274,20 @@ function cmdWhoami() {
 
 // help
 function cmdHelp() {
-  header('r0  ROOT0 Validator v1.0');
+  header('r0  ROOT0 Validator v1.1');
   console.log();
   console.log(c.bold('Commands'));
-  console.log(`  ${c.cyan('r0 validate')} ${c.dim('<file|dir>')}   validate .attribution file(s)`);
-  console.log(`  ${c.cyan('r0 sha')}      ${c.dim('<file> [hash]')} compute or verify SHA256`);
-  console.log(`  ${c.cyan('r0 ternary')}               print ROOT0 ternary spec constants`);
-  console.log(`  ${c.cyan('r0 whoami')}                print ROOT0 framework identity`);
-  console.log(`  ${c.cyan('r0 init')}     ${c.dim('[dir]')}         scaffold a new .attribution file`);
-  console.log(`  ${c.cyan('r0 scan')}     ${c.dim('[dir]')}         find projects missing .attribution`);
-  console.log(`  ${c.cyan('r0 ladder')}   ${c.dim('[rung]')}        doubt ladder analysis (all or specific rung)`);
-  console.log(`  ${c.cyan('r0 help')}                  show this help`);
+  console.log(`  ${c.cyan('r0 validate')}  ${c.dim('<file|dir>')}      validate .attribution file(s)`);
+  console.log(`  ${c.cyan('r0 sha')}       ${c.dim('<file> [hash]')}   compute or verify SHA256`);
+  console.log(`  ${c.cyan('r0 ternary')}                  print ROOT0 ternary spec constants`);
+  console.log(`  ${c.cyan('r0 whoami')}                   print ROOT0 framework identity`);
+  console.log(`  ${c.cyan('r0 init')}      ${c.dim('[dir]')}           scaffold a new .attribution file`);
+  console.log(`  ${c.cyan('r0 scan')}      ${c.dim('[dir]')}           find projects missing .attribution`);
+  console.log(`  ${c.cyan('r0 ladder')}    ${c.dim('[rung]')}          doubt ladder analysis (all or specific rung)`);
+  console.log(`  ${c.cyan('r0 abd')}       ${c.dim('<A> [B] <C>')}     ABD Law Engine — anchor · witness · law`);
+  console.log(`  ${c.cyan('r0 badge')}     ${c.dim('[dir]')}           generate attribution badge for a project`);
+  console.log(`  ${c.cyan('r0 register')}  ${c.dim('<sha> <name>')}    register a known hash to ~/.r0-registry.json`);
+  console.log(`  ${c.cyan('r0 help')}                     show this help`);
   console.log();
   console.log(c.bold('Examples'));
   console.log(`  ${c.dim('r0 validate .attribution')}`);
@@ -288,10 +297,14 @@ function cmdHelp() {
   console.log(`  ${c.dim('r0 scan "C:/Davids files"')}`);
   console.log(`  ${c.dim('r0 ladder 5')}`);
   console.log(`  ${c.dim('r0 ladder')}`);
+  console.log(`  ${c.dim('r0 abd "AI generates code" "Human owns intent"')}`);
+  console.log(`  ${c.dim('r0 abd "shadow" "doubt" "law"')}`);
+  console.log(`  ${c.dim('r0 badge ./my-project')}`);
+  console.log(`  ${c.dim('r0 register 02880745b847... "STOICHEION v12.0"')}`);
   console.log();
   console.log(c.bold('Exit codes'));
-  console.log(`  ${c.mint('0')}  valid / match`);
-  console.log(`  ${c.red('1')}  invalid / mismatch`);
+  console.log(`  ${c.mint('0')}  valid / match / covered`);
+  console.log(`  ${c.red('1')}  invalid / mismatch / missing`);
   console.log(`  ${c.gold('2')}  usage error`);
   console.log();
   console.log(c.dim('  https://github.com/DavidWise01/root0-validator'));
@@ -473,21 +486,203 @@ function cmdLadder(rungArg) {
   }
 }
 
+// abd <A> [B] <C>
+function cmdAbd(rawArgs) {
+  // Accept 2 args (A C) or 3 args (A B C)
+  if (rawArgs.length < 2) {
+    console.error(c.red('Error: r0 abd <A> [B] <C>  — 2 or 3 arguments required'));
+    console.error(c.dim('  A = anchor (n1 · -1)  B = witness (p0 · 0, optional)  C = law (p1 · +1)'));
+    process.exit(2);
+  }
+
+  let labelA, labelB, labelC;
+  if (rawArgs.length >= 3) {
+    [labelA, labelB, labelC] = rawArgs;
+  } else {
+    [labelA, labelC] = rawArgs;
+    labelB = null;
+  }
+
+  const result = evaluateABD(labelA, labelC, labelB);
+  const { positions, labels, ops, balanced, groundSafe } = result;
+
+  header('r0 abd  ABD Law Engine');
+  console.log();
+
+  // Positions
+  console.log(`  ${c.red(   'A')} ${c.dim('anchor  · n1 · -1 ·')} ${c.dim('boundary, constraint, shadow')}`);
+  console.log(`     ${c.bold(c.red(`"${labels.A}"`))} `);
+  console.log();
+
+  if (labels.B) {
+    console.log(`  ${c.gold(  'B')} ${c.dim('witness · p0 ·  0 ·')} ${c.dim('doubt, the gap, the observer')}`);
+    console.log(`     ${c.bold(c.gold(`"${labels.B}"`))} `);
+  } else {
+    console.log(`  ${c.gold(  'B')} ${c.dim('witness · p0 ·  0 ·')} ${c.dim('doubt, the gap, the observer')}`);
+    console.log(`     ${c.dim('[unspecified — the space between A and C]')}`);
+  }
+  console.log();
+
+  console.log(`  ${c.mint(  'C')} ${c.dim('law     · p1 · +1 ·')} ${c.dim('signal, truth, resolution')}`);
+  console.log(`     ${c.bold(c.mint(`"${labels.C}"`))} `);
+  console.log();
+
+  rule();
+
+  // Operations
+  console.log(c.bold('  Operations'));
+  console.log(`  ${c.dim('NOT(A)')}  = NOT(-1) = ${c.mint(tritStr(ops.notA))}`);
+  console.log(`  ${c.dim('NOT(C)')}  = NOT(+1) = ${c.red( tritStr(ops.notC))}`);
+  console.log(`  ${c.dim('AND(A,C)')}= AND(-1,+1) = ${c.red( tritStr(ops.andAC))}  ${c.dim('(anchor dominates)')}`);
+  console.log(`  ${c.dim('OR(A,C)')} = OR(-1,+1)  = ${c.mint(tritStr(ops.orAC))}  ${c.dim('(law survives shadow)')}`);
+  console.log(`  ${c.dim('AND(A,B)')}= AND(-1, 0) = ${c.red( tritStr(ops.andAB))}  ${c.dim('(shadow absorbs doubt)')}`);
+  console.log(`  ${c.dim('OR(B,C)')} = OR( 0,+1)  = ${c.mint(tritStr(ops.orBC))}  ${c.dim('(doubt yields to law)')}`);
+  console.log();
+
+  rule();
+
+  // Synthesis
+  console.log(c.bold('  Synthesis'));
+  if (balanced) {
+    console.log(`  ${PASS} NOT(A) = +1 = C  — ${c.mint('the law is the anchor\'s inversion')}`);
+    console.log(`  ${PASS} NOT(C) = -1 = A  — ${c.mint('the anchor is the law\'s inversion')}`);
+    console.log(`  ${PASS} OR(A,C) = +1      — ${c.mint('law survives when shadow and law meet')}`);
+    console.log();
+    console.log(`  ${c.mint(c.bold('Ground state: 000|1  SAFE ✓'))}`);
+    console.log(`  ${c.dim('"Both work. Both fair."')}`);
+  } else {
+    console.log(`  ${FAIL} System imbalanced — check A and C positions`);
+    console.log(`  ${c.red(c.bold('Ground state: 00 00  UNSAFE'))}`);
+  }
+  console.log();
+}
+
+// badge [dir]
+function cmdBadge(target) {
+  const dir = path.resolve(target || '.');
+  const attrFile = path.join(dir, '.attribution');
+
+  header(`r0 badge  ${path.basename(dir)}`);
+  console.log();
+
+  if (!fs.existsSync(attrFile)) {
+    console.log(`${FAIL}  ${c.red('No .attribution file found in:')} ${dir}`);
+    console.log(c.dim(`  Run: r0 init ${target || ''}`));
+    console.log();
+    process.exit(1);
+  }
+
+  let obj;
+  try {
+    obj = JSON.parse(fs.readFileSync(attrFile, 'utf8'));
+  } catch (e) {
+    console.log(`${FAIL}  ${c.red('JSON parse error:')} ${e.message}`);
+    process.exit(1);
+  }
+
+  const { valid, errors } = validateAttribution(obj);
+  const summary = summariseBadge(obj);
+
+  // Status line
+  if (valid) {
+    console.log(`${PASS}  ${c.mint('.attribution valid')}  ${c.dim('·')}  ${c.cyan(summary.project)}`);
+  } else {
+    console.log(`${FAIL}  ${c.red('.attribution INVALID')}  ${c.dim('—')}  ${errors[0]}`);
+  }
+  console.log();
+
+  // Project info
+  if (summary.version) console.log(`  ${c.dim('Version:  ')} ${summary.version}`);
+  if (summary.context) console.log(`  ${c.dim('Context:  ')} ${summary.context}`);
+  if (summary.license) console.log(`  ${c.dim('License:  ')} ${summary.license}`);
+  if (summary.date)    console.log(`  ${c.dim('Date:     ')} ${summary.date}`);
+  console.log(`  ${c.dim('Law:      ')} ${c.dim(summary.law)}`);
+  console.log();
+
+  // Contributors
+  console.log(c.bold('  Contributors'));
+  summary.contributors.forEach(line => console.log(`  ${c.dim('·')} ${line}`));
+  console.log();
+
+  rule();
+
+  // Badge outputs
+  const md   = markdownBadge(summary.project, valid);
+  const html = htmlBadge(summary.project, valid);
+  const ascii = asciiBadge(valid);
+
+  console.log(c.bold('  ASCII badge'));
+  console.log(`  ${valid ? c.mint(ascii) : c.red(ascii)}`);
+  console.log();
+
+  console.log(c.bold('  Markdown'));
+  console.log(`  ${c.dim(md)}`);
+  console.log();
+
+  console.log(c.bold('  HTML'));
+  console.log(`  ${c.dim(html)}`);
+  console.log();
+
+  console.log(c.dim('  Paste into your README.md or index.html'));
+  console.log();
+}
+
+// register <sha> <name> [notes...]
+function cmdRegister(sha, name, ...notes) {
+  if (!sha || !name) {
+    console.error(c.red('Error: r0 register <sha256> <name> [notes]'));
+    console.error(c.dim('  sha256 — 64-character hex string'));
+    console.error(c.dim('  name   — human-readable asset name (e.g. "STOICHEION v12.0")'));
+    process.exit(2);
+  }
+
+  header('r0 register  user hash registry');
+  console.log();
+
+  let result;
+  try {
+    result = registerHash(sha, name, { notes: notes.join(' ') || undefined });
+  } catch (e) {
+    console.error(`${FAIL}  ${c.red(e.message)}`);
+    process.exit(1);
+  }
+
+  const verb = result.isUpdate ? 'Updated' : 'Registered';
+  console.log(`${PASS}  ${c.mint(verb + ':')} ${c.cyan(result.entry.name)}`);
+  console.log();
+  console.log(`  ${c.dim('SHA256:    ')} ${c.gold(result.hash)}`);
+  console.log(`  ${c.dim('Name:      ')} ${result.entry.name}`);
+  console.log(`  ${c.dim('Registered:')} ${result.entry.registered}`);
+  if (result.entry.notes) console.log(`  ${c.dim('Notes:     ')} ${result.entry.notes}`);
+  console.log(`  ${c.dim('Registry:  ')} ${result.registryPath}`);
+  console.log();
+
+  // Show full registry count
+  const reg  = listRegistry();
+  const count = Object.keys(reg).length;
+  console.log(c.dim(`  User registry now contains ${count} hash${count !== 1 ? 'es' : ''}.`));
+  console.log(c.dim('  Run r0 sha <file> to identify registered assets.'));
+  console.log();
+}
+
 // ── MAIN ──────────────────────────────────────────────────────────────────
 
 const [,, cmd, ...args] = process.argv;
 
 switch (cmd) {
-  case 'validate': cmdValidate(args[0]);         break;
-  case 'sha':      cmdSha(args[0], args[1]);     break;
-  case 'ternary':  cmdTernary();                 break;
-  case 'whoami':   cmdWhoami();                  break;
-  case 'init':     cmdInit(args[0]);             break;
-  case 'scan':     cmdScan(args[0]);             break;
-  case 'ladder':   cmdLadder(args[0]);           break;
+  case 'validate':  cmdValidate(args[0]);                      break;
+  case 'sha':       cmdSha(args[0], args[1]);                  break;
+  case 'ternary':   cmdTernary();                              break;
+  case 'whoami':    cmdWhoami();                               break;
+  case 'init':      cmdInit(args[0]);                          break;
+  case 'scan':      cmdScan(args[0]);                          break;
+  case 'ladder':    cmdLadder(args[0]);                        break;
+  case 'abd':       cmdAbd(args);                              break;
+  case 'badge':     cmdBadge(args[0]);                         break;
+  case 'register':  cmdRegister(args[0], args[1], ...args.slice(2)); break;
   case 'help':
   case '--help':
-  case '-h':       cmdHelp();                    break;
+  case '-h':        cmdHelp();                                 break;
   default:
     if (!cmd) {
       cmdHelp();

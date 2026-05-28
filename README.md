@@ -1,7 +1,7 @@
 # root0-validator
 
 **Author:** David Lee Wise (ROOT0) / TriPod LLC  
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **License:** CC-BY-ND-4.0 · TRIPOD-IP-v1.1  
 **No dependencies** — Node.js built-ins only.
 
@@ -15,6 +15,9 @@ r0 whoami                      → ROOT0 framework identity
 r0 init [dir]                  → scaffold a new .attribution file
 r0 scan [dir]                  → find projects missing .attribution
 r0 ladder [rung]               → doubt ladder analysis
+r0 abd <A> [B] <C>             → ABD Law Engine — anchor · witness · law
+r0 badge [dir]                 → generate attribution badge for a project
+r0 register <sha> <name>       → register a known hash to ~/.r0-registry.json
 ```
 
 ---
@@ -201,11 +204,74 @@ Rung 11  REPEAT      177,147 states
 
 ---
 
+---
+
+### `r0 abd <A> [B] <C>`
+
+ABD Law Engine. Maps two (or three) propositions to trit positions and computes the full ternary analysis.
+
+- **A** = anchor (`n1 · -1`) — the boundary, constraint, shadow
+- **B** = witness (`p0 · 0`) — the doubt, the gap, the observer (optional)
+- **C** = law (`p1 · +1`) — the signal, truth, resolution
+
+```bash
+r0 abd "AI generates code" "Human owns intent"
+r0 abd "shadow" "the doubt between them" "law"
+```
+
+Output includes all trit operations (`NOT`, `AND`, `OR`) and a synthesis conclusion:
+```
+  Synthesis
+  ✓ NOT(A) = +1 = C  — the law is the anchor's inversion
+  ✓ OR(A,C) = +1     — law survives when shadow and law meet
+
+  Ground state: 000|1  SAFE ✓
+  "Both work. Both fair."
+```
+
+---
+
+### `r0 badge [dir]`
+
+Reads `.attribution` from the target directory (defaults to current) and generates a shields.io badge in three formats: ASCII, Markdown, and HTML.
+
+```bash
+r0 badge                    # badge for current directory
+r0 badge ./my-project       # badge for a specific project
+```
+
+Output:
+```
+  ASCII badge
+  [ ROOT0 · Attribution v1.0 · ✓ ]
+
+  Markdown
+  [![ROOT0 Attribution v1.0](https://img.shields.io/badge/...)](...)
+
+  HTML
+  <a href="..."><img src="..." alt="..."></a>
+```
+
+---
+
+### `r0 register <sha256> <name> [notes]`
+
+Registers a known SHA256 hash to `~/.r0-registry.json`. Once registered, `r0 sha <file>` automatically identifies matching files by name.
+
+```bash
+r0 register 02880745b847... "STOICHEION v12.0"
+r0 register 02880745b847... "My Document v1.0" "prior art 2026-05-27"
+```
+
+The user registry is merged with built-in ROOT0 hashes at runtime. Built-in hashes (STOICHEION etc.) cannot be overridden.
+
+---
+
 ## Tests
 
 ```bash
 node test.js
-# 39 tests passed
+# 58 tests passed
 ```
 
 ---

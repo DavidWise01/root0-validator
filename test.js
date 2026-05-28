@@ -7,9 +7,12 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { validateAttribution }              = require('./lib/attribution');
-const { not, and, or, resolve, stateCount, SPEC } = require('./lib/ternary');
-const { scanDir, hasAttribution }          = require('./lib/scan');
+const { validateAttribution }                       = require('./lib/attribution');
+const { not, and, or, resolve, stateCount, SPEC }   = require('./lib/ternary');
+const { scanDir, hasAttribution }                   = require('./lib/scan');
+const { evaluateABD, tritStr, POS }                 = require('./lib/abd');
+const { markdownBadge, htmlBadge, asciiBadge, summariseBadge } = require('./lib/badge');
+const { registerHash, loadUserRegistry, removeHash, REGISTRY_PATH } = require('./lib/register');
 
 let passed = 0, failed = 0;
 
@@ -300,6 +303,146 @@ test('scanDir: skips node_modules', () => {
     const results = scanDir(rootDir);
     assert(results.length === 0, `should skip node_modules — got ${results.length}`);
   });
+});
+
+// ── ABD Law Engine tests ──────────────────────────────────────────────────
+
+test('POS: A=-1, B=0, C=+1', () => {
+  assert(POS.A === -1);
+  assert(POS.B ===  0);
+  assert(POS.C ===  1);
+});
+
+test('tritStr formats correctly', () => {
+  assert(tritStr( 1) === '+1');
+  assert(tritStr(-1) === '-1');
+  assert(tritStr( 0) ===  ' 0');
+});
+
+test('evaluateABD: canonical A/C balanced', () => {
+  const r = evaluateABD('shadow', 'law');
+  assert(r.balanced === true,    'should be balanced');
+  assert(r.groundSafe === true,  'should be ground-safe');
+  assert(r.ops.notA  ===  1,    'NOT(A) should be +1');
+  assert(r.ops.notC  === -1,    'NOT(C) should be -1');
+  assert(r.ops.andAC === -1,    'AND(A,C) should be -1');
+  assert(r.ops.orAC  ===  1,    'OR(A,C) should be +1');
+});
+
+test('evaluateABD: labels stored correctly', () => {
+  const r = evaluateABD('anchor-text', 'law-text', 'witness-text');
+  assert(r.labels.A === 'anchor-text');
+  assert(r.labels.B === 'witness-text');
+  assert(r.labels.C === 'law-text');
+});
+
+test('evaluateABD: B label is null when omitted', () => {
+  const r = evaluateABD('A', 'C');
+  assert(r.labels.B === null);
+});
+
+test('evaluateABD: NOT(A) always equals C', () => {
+  // By definition of the ABD framework, NOT(n1) = p1
+  const r = evaluateABD('anything', 'anything-else');
+  assert(r.ops.notA === POS.C, 'NOT(A) must equal C');
+});
+
+test('evaluateABD: OR(B,C) always equals C (+1)', () => {
+  // p0 OR p1 = max = p1
+  const r = evaluateABD('a', 'c');
+  assert(r.ops.orBC === 1);
+});
+
+// ── Badge tests ───────────────────────────────────────────────────────────
+
+test('markdownBadge: valid produces cyan badge markdown', () => {
+  const md = markdownBadge('my-project', true);
+  assert(md.includes('!['), 'should be markdown img');
+  assert(md.includes('67e8f9'), 'valid should use cyan color');
+  assert(md.includes('attribution-standard'), 'should link to attribution-standard');
+});
+
+test('markdownBadge: invalid produces red badge markdown', () => {
+  const md = markdownBadge('my-project', false);
+  assert(md.includes('ef4444'), 'invalid should use red color');
+});
+
+test('asciiBadge: valid shows checkmark', () => {
+  const b = asciiBadge(true);
+  assert(b.includes('✓'));
+  assert(b.includes('ROOT0'));
+});
+
+test('asciiBadge: invalid shows cross', () => {
+  const b = asciiBadge(false);
+  assert(b.includes('✗'));
+});
+
+test('htmlBadge: produces img tag', () => {
+  const h = htmlBadge('my-project', true);
+  assert(h.includes('<img'));
+  assert(h.includes('<a href='));
+});
+
+test('summariseBadge: extracts project and contributors', () => {
+  const obj = {
+    project: 'test-proj',
+    law: 'Both work. Both fair.',
+    contributors: [
+      { name: 'ROOT0', substrate: 'human', role: 'architect', contribution: 'intent' },
+    ],
+  };
+  const s = summariseBadge(obj);
+  assert(s.project === 'test-proj');
+  assert(s.contributors.length === 1);
+  assert(s.contributors[0].includes('ROOT0'));
+});
+
+// ── Register tests ────────────────────────────────────────────────────────
+
+const TEST_SHA = 'a'.repeat(64);
+const TEST_NAME = '__r0-test-asset__';
+
+// Clean up test entry if it exists from a prior run
+try { removeHash(TEST_SHA); } catch {}
+
+test('registerHash: saves to user registry', () => {
+  const r = registerHash(TEST_SHA, TEST_NAME);
+  assert(r.hash === TEST_SHA);
+  assert(r.entry.name === TEST_NAME);
+  assert(typeof r.registryPath === 'string');
+  assert(!r.isUpdate, 'should be a new entry');
+});
+
+test('registerHash: can be read back', () => {
+  const reg = loadUserRegistry();
+  assert(reg[TEST_SHA], 'entry should exist');
+  assert(reg[TEST_SHA].name === TEST_NAME);
+});
+
+test('registerHash: update sets isUpdate flag', () => {
+  const r = registerHash(TEST_SHA, TEST_NAME + '-v2');
+  assert(r.isUpdate === true);
+  assert(r.entry.name === TEST_NAME + '-v2');
+});
+
+test('removeHash: deletes entry from registry', () => {
+  const removed = removeHash(TEST_SHA);
+  assert(removed === true, 'should return true');
+  const reg = loadUserRegistry();
+  assert(!reg[TEST_SHA], 'entry should be gone');
+});
+
+test('registerHash: rejects short sha', () => {
+  let threw = false;
+  try { registerHash('abc', 'test'); } catch { threw = true; }
+  assert(threw, 'should throw on short sha');
+});
+
+test('registerHash: rejects empty name', () => {
+  let threw = false;
+  try { registerHash(TEST_SHA, ''); } catch { threw = true; }
+  assert(threw, 'should throw on empty name');
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────
