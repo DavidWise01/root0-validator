@@ -15,6 +15,7 @@
 //   r0 badge [dir]               generate attribution badge for a project
 //   r0 register <sha> <name>     register a known hash to ~/.r0-registry.json
 //   r0 audit [username]          GitHub attribution coverage report
+//   r0 lineage [dir|file]        trace provenance chain → ROOT0 foundation
 //   r0 whoami                    print ROOT0 framework identity
 //   r0 help                      show this help
 
@@ -27,9 +28,11 @@ const { SPEC, stateCount }                          = require('./lib/ternary');
 const { runInit }                                   = require('./lib/init');
 const { scanDir }                                   = require('./lib/scan');
 const { evaluateABD, tritStr }                      = require('./lib/abd');
-const { markdownBadge, htmlBadge, asciiBadge, summariseBadge } = require('./lib/badge');
+const { markdownBadge, htmlBadge, asciiBadge, summariseBadge,
+        lineageMarkdownBadge, lineageHtmlBadge, lineageAsciiBadge } = require('./lib/badge');
 const { registerHash, listRegistry, REGISTRY_PATH } = require('./lib/register');
 const { runAudit }                                  = require('./lib/audit');
+const { buildChain, buildLocalChain, isCertified, resolveFramework } = require('./lib/lineage');
 
 // ── ANSI colours (graceful fallback if not a TTY) ─────────────────────────
 const isTTY = process.stdout.isTTY;
@@ -290,6 +293,7 @@ function cmdHelp() {
   console.log(`  ${c.cyan('r0 badge')}     ${c.dim('[dir]')}           generate attribution badge for a project`);
   console.log(`  ${c.cyan('r0 register')}  ${c.dim('<sha> <name>')}    register a known hash to ~/.r0-registry.json`);
   console.log(`  ${c.cyan('r0 audit')}     ${c.dim('[username]')}      GitHub attribution coverage report`);
+  console.log(`  ${c.cyan('r0 lineage')}   ${c.dim('[dir] [--follow]')} trace provenance chain → ROOT0 foundation`);
   console.log(`  ${c.cyan('r0 help')}                     show this help`);
   console.log();
   console.log(c.bold('Examples'));
@@ -308,6 +312,8 @@ function cmdHelp() {
   console.log(`  ${c.dim('r0 audit DavidWise01')}`);
   console.log(`  ${c.dim('r0 audit DavidWise01 --token ghp_xxx')}`);
   console.log(`  ${c.dim('r0 audit --json > coverage.json')}`);
+  console.log(`  ${c.dim('r0 lineage')}`);
+  console.log(`  ${c.dim('r0 lineage ./my-project --follow')}`);
   console.log();
   console.log(c.bold('Exit codes'));
   console.log(`  ${c.mint('0')}  valid / match / covered`);
@@ -611,27 +617,183 @@ function cmdBadge(target) {
   summary.contributors.forEach(line => console.log(`  ${c.dim('·')} ${line}`));
   console.log();
 
+  // Lineage check
+  const chain      = buildLocalChain(obj);
+  const certified  = isCertified(chain);
+  const fwName     = obj.framework || null;
+  const fwResolved = fwName ? resolveFramework(fwName) : null;
+
+  if (fwName) {
+    console.log(c.bold('  Lineage'));
+    if (certified) {
+      console.log(`  ${PASS} ${c.mint('framework: ' + fwName + ' — SHA verified')}`);
+      if (fwResolved) {
+        console.log(`  ${c.dim('    SHA256:    ' + fwResolved.sha256.slice(0, 24) + '...')}`);
+        console.log(`  ${c.dim('    Prior art: ' + fwResolved.prior_art)}`);
+        console.log(`  ${c.dim('    Author:    ' + fwResolved.author)}`);
+      }
+      console.log(`  ${c.mint(c.bold('    ROOT0 LINEAGE CERTIFIED ✓'))}`);
+    } else {
+      console.log(`  ${WARN} ${c.gold('framework: ' + fwName + ' — not in known hashes (unverified)')}`);
+    }
+    console.log();
+  }
+
   rule();
 
   // Badge outputs
-  const md   = markdownBadge(summary.project, valid);
-  const html = htmlBadge(summary.project, valid);
+  const md    = markdownBadge(summary.project, valid);
+  const html  = htmlBadge(summary.project, valid);
   const ascii = asciiBadge(valid);
+  const lMd   = lineageMarkdownBadge(certified, fwName);
+  const lHtml = lineageHtmlBadge(certified, fwName);
+  const lAscii = lineageAsciiBadge(certified, fwName);
 
-  console.log(c.bold('  ASCII badge'));
+  console.log(c.bold('  Attribution badge'));
   console.log(`  ${valid ? c.mint(ascii) : c.red(ascii)}`);
-  console.log();
-
-  console.log(c.bold('  Markdown'));
   console.log(`  ${c.dim(md)}`);
   console.log();
 
-  console.log(c.bold('  HTML'));
+  console.log(c.bold('  Lineage badge'));
+  console.log(`  ${certified ? c.mint(lAscii) : c.gold(lAscii)}`);
+  console.log(`  ${c.dim(lMd)}`);
+  console.log();
+
+  console.log(c.bold('  HTML (both badges)'));
   console.log(`  ${c.dim(html)}`);
+  console.log(`  ${c.dim(lHtml)}`);
   console.log();
 
   console.log(c.dim('  Paste into your README.md or index.html'));
   console.log();
+}
+
+// lineage [dir|file] [--token <PAT>] [--follow]
+async function cmdLineage(target, rawFlags) {
+  const dir  = path.resolve(target || '.');
+  const token = process.env.GITHUB_TOKEN
+    || (rawFlags.includes('--token') ? rawFlags[rawFlags.indexOf('--token') + 1] : null)
+    || (rawFlags.find(f => f.startsWith('--token=')) || '').split('=')[1]
+    || null;
+  const follow = rawFlags.includes('--follow');
+
+  // Locate .attribution
+  let attrPath = dir;
+  if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
+    attrPath = path.join(dir, '.attribution');
+  }
+
+  header(`r0 lineage  ${path.basename(dir)}`);
+  console.log();
+
+  if (!fs.existsSync(attrPath)) {
+    console.log(`${FAIL}  ${c.red('No .attribution found at:')} ${attrPath}`);
+    console.log(c.dim(`  Run: r0 init ${target || ''}`));
+    console.log();
+    process.exit(1);
+  }
+
+  let obj;
+  try {
+    obj = JSON.parse(fs.readFileSync(attrPath, 'utf8'));
+  } catch (e) {
+    console.log(`${FAIL}  ${c.red('JSON parse error:')} ${e.message}`);
+    process.exit(1);
+  }
+
+  // Build the chain
+  const chain = follow
+    ? await buildChain(obj, { token })
+    : buildLocalChain(obj);
+
+  const certified = isCertified(chain);
+
+  // ── Render the tree ──────────────────────────────────────────────────────
+  chain.forEach((link, i) => {
+    const isLast  = i === chain.length - 1;
+    const indent  = '  '.repeat(Math.floor(link.depth || 0));
+    const prefix  = link.depth === 0 ? '' : indent + (isLast ? '└── ' : '└── ');
+
+    if (link.type === 'project') {
+      const name = c.bold(c.cyan(link.name));
+      const fmt  = link.format ? c.dim(` · ${link.format}`) : '';
+      console.log(`${prefix}${name}${fmt}`);
+      if (link.contributors && link.contributors.length > 0) {
+        link.contributors.forEach(co => {
+          const role = c.dim(`${co.substrate} · ${co.role}`);
+          console.log(`${indent}  ${c.dim('·')} ${co.name}  ${role}`);
+        });
+      }
+      if (link.parent) {
+        console.log(`${indent}  ${c.dim('parent →')} ${c.dim(link.parent)}`);
+      }
+
+    } else if (link.type === 'parent-link') {
+      console.log(`${indent}${c.dim('└── [fetched parent]')} ${c.gold(link.name)}`);
+
+    } else if (link.type === 'framework') {
+      const verTag = link.verified
+        ? c.mint('SHA verified ✓')
+        : c.gold('SHA unverified');
+      console.log(`${prefix}${c.gold('framework:')} ${c.bold(link.name)}  ${c.dim('·')}  ${verTag}`);
+      if (link.verified) {
+        console.log(`${indent}    ${c.dim('SHA256:    ')}${c.gold(link.sha256.slice(0, 24) + '...')}`);
+        if (link.prior_art) console.log(`${indent}    ${c.dim('Prior art: ')}${link.prior_art}`);
+        if (link.zenodo)    console.log(`${indent}    ${c.dim('Zenodo:    ')}${link.zenodo}`);
+        if (link.repo)      console.log(`${indent}    ${c.dim('Repo:      ')}${link.repo}`);
+      }
+
+    } else if (link.type === 'foundation') {
+      console.log(`${prefix}${c.mint(c.bold(link.name))}`);
+      if (link.law)       console.log(`${indent}    ${c.dim('"' + link.law + '"')}`);
+      if (link.prior_art) console.log(`${indent}    ${c.dim('Prior art: ')}${link.prior_art}`);
+    }
+
+    // Connector line between links
+    if (i < chain.length - 1 && link.type !== 'parent-link') {
+      const nextDepth = Math.floor(chain[i + 1].depth || 0);
+      const connIndent = '  '.repeat(nextDepth);
+      console.log(`${connIndent}  ${c.dim('│')}`);
+    }
+  });
+
+  console.log();
+  rule();
+
+  // ── Verdict ──────────────────────────────────────────────────────────────
+  if (certified) {
+    console.log();
+    console.log(c.mint(c.bold('  ROOT0 LINEAGE CERTIFIED ✓')));
+    console.log(c.dim('  This project\'s provenance traces to the ROOT0 foundation.'));
+    console.log(c.dim('  STOICHEION v11.0 · prior art 2026-02-02 · SHA verified'));
+    console.log();
+    // Lineage badge suggestion
+    const chain0   = chain.find(l => l.type === 'project');
+    const fwLink   = chain.find(l => l.type === 'framework');
+    const fwName   = fwLink ? fwLink.name : 'STOICHEION v11.0';
+    console.log(c.bold('  Add to your README.md:'));
+    console.log(`  ${c.dim(lineageMarkdownBadge(true, fwName))}`);
+    console.log();
+  } else {
+    const hasFramework = chain.some(l => l.type === 'framework');
+    console.log();
+    if (!hasFramework) {
+      console.log(c.gold('  LINEAGE UNVERIFIED — no framework field in .attribution'));
+      console.log(c.dim('  Add: "framework": "STOICHEION v11.0" to your .attribution file'));
+    } else {
+      console.log(c.gold('  LINEAGE UNVERIFIED — framework not in known hash registry'));
+      console.log(c.dim('  Register the framework SHA with: r0 register <sha> <name>'));
+    }
+    console.log();
+  }
+
+  if (!follow && obj.parent) {
+    console.log(c.dim(`  Tip: run with --follow to trace parent chain remotely`));
+    console.log(c.dim(`       r0 lineage ${target || '.'} --follow`));
+    console.log();
+  }
+
+  process.exit(certified ? 0 : 1);
 }
 
 // audit [username] [--token <PAT>] [--json] [--include-forks] [--include-archived]
@@ -721,8 +883,12 @@ async function cmdAudit(rawArgs) {
       const errSnip = (r.errors || [])[0] || 'invalid';
       console.log(`${WARN}  ${name} ${c.gold('.attribution INVALID')} ${c.dim('— ' + errSnip)}`);
     } else {
-      const proj = r.project ? c.dim(` (${r.project})`) : '';
-      console.log(`${PASS}  ${name} ${c.dim('.attribution valid')}${proj}`);
+      const lineageTag = r.certified
+        ? c.mint(' [ROOT0 ✓]')
+        : r.framework
+          ? c.gold(` [${r.framework} — unverified]`)
+          : c.dim(' [no lineage]');
+      console.log(`${PASS}  ${name} ${c.dim('.attribution valid')}${lineageTag}`);
     }
   });
 
@@ -739,6 +905,12 @@ async function cmdAudit(rawArgs) {
       : `${covered}/${total} covered (${pctStr}) — ${invalid} invalid`;
 
   console.log(`  Attribution coverage: ${summaryColor(summaryText)}`);
+
+  // Lineage tally (only show if any repos are covered)
+  if (covered > 0) {
+    const certColor = certified === covered ? c.mint : c.gold;
+    console.log(`  ROOT0 Lineage certified: ${certColor(`${certified}/${covered} attributed repos`)}`);
+  }
 
   // Rate limit info
   if (audit.rateInfo) {
@@ -821,6 +993,7 @@ switch (cmd) {
   case 'badge':     cmdBadge(args[0]);                         break;
   case 'register':  cmdRegister(args[0], args[1], ...args.slice(2)); break;
   case 'audit':     cmdAudit(args);                            break;
+  case 'lineage':   cmdLineage(args[0], args.slice(1));        break;
   case 'help':
   case '--help':
   case '-h':        cmdHelp();                                 break;

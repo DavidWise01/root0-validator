@@ -12,6 +12,9 @@ const { not, and, or, resolve, stateCount, SPEC }   = require('./lib/ternary');
 const { scanDir, hasAttribution }                   = require('./lib/scan');
 const { evaluateABD, tritStr, POS }                 = require('./lib/abd');
 const { parseAttributionResponse, runBatch }        = require('./lib/audit');
+const { buildLocalChain, isCertified, resolveFramework,
+        extractGitHubCoords, KNOWN_FRAMEWORKS }     = require('./lib/lineage');
+const { lineageAsciiBadge, lineageMarkdownBadge }   = require('./lib/badge');
 const { markdownBadge, htmlBadge, asciiBadge, summariseBadge } = require('./lib/badge');
 const { registerHash, loadUserRegistry, removeHash, REGISTRY_PATH } = require('./lib/register');
 
@@ -551,6 +554,182 @@ test('runBatch: batch size 1 still runs all tasks', async () => {
 test('runBatch: empty task array returns empty results', async () => {
   const r = await runBatch([], 5);
   assert(Array.isArray(r) && r.length === 0);
+});
+
+// ── Lineage tracker tests ─────────────────────────────────────────────────
+
+const WITH_FRAMEWORK = {
+  ...VALID_ATTR,
+  framework: 'STOICHEION v11.0',
+};
+
+const WITH_PARENT = {
+  ...VALID_ATTR,
+  framework:  'STOICHEION v11.0',
+  parent:     'https://github.com/DavidWise01/root0-registry',
+};
+
+const NO_FRAMEWORK = { ...VALID_ATTR };
+
+test('resolveFramework: STOICHEION v11.0 resolves', () => {
+  const fw = resolveFramework('STOICHEION v11.0');
+  assert(fw !== null, 'should resolve');
+  assert(fw.sha256 === '02880745b847317c4e2424524ec25d0f7a2b84368d184586f45b54af9fcab763');
+  assert(fw.prior_art === '2026-02-02');
+});
+
+test('resolveFramework: partial name resolves', () => {
+  const fw = resolveFramework('STOICHEION');
+  assert(fw !== null, 'should resolve partial');
+  assert(fw.name === 'STOICHEION v11.0');
+});
+
+test('resolveFramework: unknown framework returns null', () => {
+  const fw = resolveFramework('MYSTERY v99.0');
+  assert(fw === null);
+});
+
+test('resolveFramework: null/undefined returns null', () => {
+  assert(resolveFramework(null)      === null);
+  assert(resolveFramework(undefined) === null);
+  assert(resolveFramework('')        === null);
+});
+
+test('buildLocalChain: no framework → chain length 1', () => {
+  const chain = buildLocalChain(NO_FRAMEWORK);
+  assert(chain.length === 1, `expected 1, got ${chain.length}`);
+  assert(chain[0].type === 'project');
+});
+
+test('buildLocalChain: with known framework → chain length 3', () => {
+  const chain = buildLocalChain(WITH_FRAMEWORK);
+  assert(chain.length === 3, `expected 3, got ${chain.length}`);
+  assert(chain[0].type === 'project');
+  assert(chain[1].type === 'framework');
+  assert(chain[2].type === 'foundation');
+});
+
+test('buildLocalChain: framework link has correct sha256', () => {
+  const chain = buildLocalChain(WITH_FRAMEWORK);
+  const fw    = chain.find(l => l.type === 'framework');
+  assert(fw.verified === true);
+  assert(fw.sha256 === '02880745b847317c4e2424524ec25d0f7a2b84368d184586f45b54af9fcab763');
+});
+
+test('buildLocalChain: foundation link is certified', () => {
+  const chain = buildLocalChain(WITH_FRAMEWORK);
+  const found = chain.find(l => l.type === 'foundation');
+  assert(found, 'foundation link missing');
+  assert(found.certified === true);
+});
+
+test('buildLocalChain: unknown framework → chain length 2, not certified', () => {
+  const chain = buildLocalChain({ ...VALID_ATTR, framework: 'MYSTERY v99.0' });
+  assert(chain.length === 2, `expected 2, got ${chain.length}`);
+  assert(chain[1].type === 'framework');
+  assert(chain[1].verified === false);
+});
+
+test('isCertified: chain with known framework = true', () => {
+  assert(isCertified(buildLocalChain(WITH_FRAMEWORK)) === true);
+});
+
+test('isCertified: chain without framework = false', () => {
+  assert(isCertified(buildLocalChain(NO_FRAMEWORK)) === false);
+});
+
+test('isCertified: chain with unknown framework = false', () => {
+  assert(isCertified(buildLocalChain({ ...VALID_ATTR, framework: 'UNKNOWN v0' })) === false);
+});
+
+test('buildLocalChain: stores parent field in project link', () => {
+  const chain = buildLocalChain(WITH_PARENT);
+  assert(chain[0].parent === 'https://github.com/DavidWise01/root0-registry');
+});
+
+test('extractGitHubCoords: parses https://github.com URL', () => {
+  const c = extractGitHubCoords('https://github.com/DavidWise01/root0-registry');
+  assert(c.user === 'DavidWise01');
+  assert(c.repo === 'root0-registry');
+});
+
+test('extractGitHubCoords: parses bare github.com URL', () => {
+  const c = extractGitHubCoords('github.com/DavidWise01/my-repo');
+  assert(c.user === 'DavidWise01');
+  assert(c.repo === 'my-repo');
+});
+
+test('extractGitHubCoords: returns null for non-GitHub URL', () => {
+  assert(extractGitHubCoords('https://gitlab.com/foo/bar') === null);
+  assert(extractGitHubCoords('not-a-url') === null);
+});
+
+test('KNOWN_FRAMEWORKS: STOICHEION sha matches KNOWN_HASHES built-in', () => {
+  const fw = KNOWN_FRAMEWORKS['STOICHEION v11.0'];
+  assert(fw.sha256 === '02880745b847317c4e2424524ec25d0f7a2b84368d184586f45b54af9fcab763');
+});
+
+test('parseAttributionResponse: certified when framework = STOICHEION v11.0', () => {
+  const body = makeGitHubContentsBody({ ...VALID_ATTR, framework: 'STOICHEION v11.0' });
+  const r    = parseAttributionResponse(body);
+  assert(r.certified === true, 'should be certified');
+  assert(r.framework === 'STOICHEION v11.0');
+});
+
+test('parseAttributionResponse: not certified when no framework', () => {
+  const body = makeGitHubContentsBody(VALID_ATTR);
+  const r    = parseAttributionResponse(body);
+  assert(r.certified === false);
+  assert(r.framework === null);
+});
+
+// ── Lineage badge tests ───────────────────────────────────────────────────
+
+test('lineageAsciiBadge: certified shows CERTIFIED', () => {
+  const b = lineageAsciiBadge(true, 'STOICHEION v11.0');
+  assert(b.includes('CERTIFIED'));
+  assert(b.includes('ROOT0'));
+  assert(b.includes('STOICHEION'));
+});
+
+test('lineageAsciiBadge: uncertified shows UNVERIFIED', () => {
+  const b = lineageAsciiBadge(false);
+  assert(b.includes('UNVERIFIED'));
+});
+
+test('lineageMarkdownBadge: certified uses mint/green color', () => {
+  const md = lineageMarkdownBadge(true, 'STOICHEION v11.0');
+  assert(md.includes('86efac'));
+  assert(md.includes('stoicheion'));
+});
+
+test('lineageMarkdownBadge: uncertified uses amber color', () => {
+  const md = lineageMarkdownBadge(false);
+  assert(md.includes('fbbf24'));
+});
+
+// ── Attribution validator — new lineage fields ────────────────────────────
+
+test('validateAttribution: parent field accepted without error', () => {
+  const r = validateAttribution({ ...VALID_ATTR, parent: 'https://github.com/DavidWise01/root0-registry' });
+  assert(r.valid === true, `should be valid — ${r.errors.join(', ')}`);
+});
+
+test('validateAttribution: sha256 field accepted without error', () => {
+  const r = validateAttribution({ ...VALID_ATTR, sha256: '02880745b847317c4e2424524ec25d0f7a2b84368d184586f45b54af9fcab763' });
+  assert(r.valid === true, `should be valid — ${r.errors.join(', ')}`);
+});
+
+test('validateAttribution: bad sha256 raises warning not error', () => {
+  const r = validateAttribution({ ...VALID_ATTR, sha256: 'not-a-sha' });
+  assert(r.valid === true, 'should still be valid');
+  assert(r.warnings.some(w => w.includes('sha256')));
+});
+
+test('validateAttribution: empty parent raises warning not error', () => {
+  const r = validateAttribution({ ...VALID_ATTR, parent: '' });
+  assert(r.valid === true, 'should still be valid');
+  assert(r.warnings.some(w => w.includes('parent')));
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────

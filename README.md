@@ -1,7 +1,7 @@
 # root0-validator
 
 **Author:** David Lee Wise (ROOT0) / TriPod LLC  
-**Version:** 1.3.0  
+**Version:** 1.4.0  
 **License:** CC-BY-ND-4.0 · TRIPOD-IP-v1.1  
 **No dependencies** — Node.js built-ins only.
 
@@ -19,6 +19,7 @@ r0 abd <A> [B] <C>             → ABD Law Engine — anchor · witness · law
 r0 badge [dir]                 → generate attribution badge for a project
 r0 register <sha> <name>       → register a known hash to ~/.r0-registry.json
 r0 audit [username]            → GitHub attribution coverage report
+r0 lineage [dir] [--follow]   → trace provenance chain → ROOT0 foundation
 ```
 
 ---
@@ -297,11 +298,55 @@ r0 audit --forks --archived       # include forks and archived repos
 
 ---
 
+---
+
+### `r0 lineage [dir] [--follow]`
+
+Traces the provenance chain of a project backwards to the ROOT0 foundation. Reads `.attribution` from the target directory, resolves the `framework` field against known SHA256 hashes, and renders the full chain as a tree.
+
+```bash
+r0 lineage                    # trace current directory
+r0 lineage ./my-project       # trace a specific project
+r0 lineage --follow           # also follow parent: field via GitHub API
+```
+
+```
+my-project · ROOT0-ATTRIBUTION-v1.0
+  · David Lee Wise  human · architect
+  · AVAN  synthetic · co-author
+    │
+  └── framework: STOICHEION v11.0  ·  SHA verified ✓
+      SHA256:    02880745b847317c4e242452...
+      Prior art: 2026-02-02
+      Zenodo:    10.5281/zenodo.19122994
+      │
+    └── David Lee Wise / ROOT0 / TriPod LLC
+        "Both work. Both fair."
+
+  ROOT0 LINEAGE CERTIFIED ✓
+  Add to your README.md:
+  [![ROOT0 Lineage Certified](https://img.shields.io/badge/ROOT0%20Lineage-Certified-86efac...)](...)
+```
+
+**Lineage fields in `.attribution`** (all optional beyond `framework`):
+
+| Field | Description |
+|---|---|
+| `framework` | `"STOICHEION v11.0"` — the governance document (enables certification) |
+| `parent` | GitHub URL of parent project for explicit multi-hop chain |
+| `sha256` | SHA256 of this project's own canonical document |
+
+**`r0 badge`** now outputs two badges: standard attribution + ROOT0 Lineage Certified (green if certified, amber if unverified).
+
+**`r0 audit`** now shows `[ROOT0 ✓]` next to each lineage-certified repo.
+
+---
+
 ## Tests
 
 ```bash
 node test.js
-# 66 tests passed
+# 93 tests passed
 ```
 
 ---
