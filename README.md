@@ -1,7 +1,7 @@
 # root0-validator
 
 **Author:** David Lee Wise (ROOT0) / TriPod LLC  
-**Version:** 1.2.0  
+**Version:** 1.3.0  
 **License:** CC-BY-ND-4.0 · TRIPOD-IP-v1.1  
 **No dependencies** — Node.js built-ins only.
 
@@ -18,6 +18,7 @@ r0 ladder [rung]               → doubt ladder analysis
 r0 abd <A> [B] <C>             → ABD Law Engine — anchor · witness · law
 r0 badge [dir]                 → generate attribution badge for a project
 r0 register <sha> <name>       → register a known hash to ~/.r0-registry.json
+r0 audit [username]            → GitHub attribution coverage report
 ```
 
 ---
@@ -267,11 +268,40 @@ The user registry is merged with built-in ROOT0 hashes at runtime. Built-in hash
 
 ---
 
+---
+
+### `r0 audit [username]`
+
+Fetches all public repos for a GitHub user via the GitHub API, checks each for a `.attribution` file, downloads and validates the content, and reports coverage.
+
+```bash
+r0 audit                          # audit DavidWise01 (default)
+r0 audit DavidWise01              # same
+r0 audit DavidWise01 --token ghp_xxx   # authenticated (5000 req/hr vs 60/hr)
+r0 audit --json > coverage.json   # JSON output for scripting
+r0 audit --forks --archived       # include forks and archived repos
+```
+
+```
+  ✓  root0-validator          .attribution valid (root0-validator)
+  ✗  lineage-kernel           no .attribution
+  !  ternary-spec             .attribution INVALID — missing law field
+
+  Attribution coverage: 1/60 covered (1%) — 59 missing, 0 invalid
+  GitHub API: 56 requests remaining  resets 2026-05-28 05:08:16 UTC
+```
+
+**Rate limits:** Unauthenticated requests allow 60/hr from your IP — enough for ~58 repos. For larger orgs or frequent runs, set `GITHUB_TOKEN` or pass `--token <PAT>`.
+
+**Exit codes:** `0` = fully covered · `1` = any missing/invalid · `2` = API/usage error
+
+---
+
 ## Tests
 
 ```bash
 node test.js
-# 58 tests passed
+# 66 tests passed
 ```
 
 ---

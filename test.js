@@ -11,21 +11,44 @@ const { validateAttribution }                       = require('./lib/attribution
 const { not, and, or, resolve, stateCount, SPEC }   = require('./lib/ternary');
 const { scanDir, hasAttribution }                   = require('./lib/scan');
 const { evaluateABD, tritStr, POS }                 = require('./lib/abd');
+const { parseAttributionResponse, runBatch }        = require('./lib/audit');
 const { markdownBadge, htmlBadge, asciiBadge, summariseBadge } = require('./lib/badge');
 const { registerHash, loadUserRegistry, removeHash, REGISTRY_PATH } = require('./lib/register');
 
 let passed = 0, failed = 0;
+const asyncTests = [];   // collect async tests to await before printing summary
 
 function test(name, fn) {
+  let result;
   try {
-    fn();
-    console.log(`\x1b[92m✓\x1b[0m  ${name}`);
-    passed++;
+    result = fn();
   } catch (e) {
+    // Sync throw
     console.log(`\x1b[91m✗\x1b[0m  ${name}`);
     console.log(`   ${e.message}`);
     failed++;
+    return;
   }
+
+  // Async test — fn returned a Promise
+  if (result && typeof result.then === 'function') {
+    const p = result
+      .then(() => {
+        console.log(`\x1b[92m✓\x1b[0m  ${name}`);
+        passed++;
+      })
+      .catch(e => {
+        console.log(`\x1b[91m✗\x1b[0m  ${name}`);
+        console.log(`   ${e.message}`);
+        failed++;
+      });
+    asyncTests.push(p);
+    return;
+  }
+
+  // Sync pass
+  console.log(`\x1b[92m✓\x1b[0m  ${name}`);
+  passed++;
 }
 
 function assert(cond, msg) {
@@ -445,14 +468,101 @@ test('registerHash: rejects empty name', () => {
   assert(threw, 'should throw on empty name');
 });
 
+// ── Audit helper tests (no real API calls) ────────────────────────────────
+
+function makeGitHubContentsBody(attrObj) {
+  const json    = JSON.stringify(attrObj);
+  const b64     = Buffer.from(json).toString('base64');
+  // GitHub wraps content in chunks with \n — simulate that
+  return JSON.stringify({ content: b64 + '\n', encoding: 'base64', name: '.attribution' });
+}
+
+const VALID_ATTR = {
+  format: 'ROOT0-ATTRIBUTION-v1.0',
+  project: 'audit-test',
+  law: 'Both work. Both fair.',
+  contributors: [
+    { name: 'ROOT0', substrate: 'human', role: 'architect', contribution: 'intent · direction' },
+  ],
+};
+
+test('parseAttributionResponse: valid content returns valid:true', () => {
+  const body = makeGitHubContentsBody(VALID_ATTR);
+  const r    = parseAttributionResponse(body);
+  assert(r.found  === true,  'found should be true');
+  assert(r.valid  === true,  `valid should be true — ${(r.errors || []).join(', ')}`);
+  assert(r.errors.length === 0, 'should have no errors');
+});
+
+test('parseAttributionResponse: invalid attr returns valid:false', () => {
+  const bad = { ...VALID_ATTR, law: 'wrong law' };
+  const body = makeGitHubContentsBody(bad);
+  const r    = parseAttributionResponse(body);
+  assert(r.found  === true);
+  assert(r.valid  === false, 'should be invalid');
+  assert(r.errors.length  > 0, 'should have errors');
+});
+
+test('parseAttributionResponse: malformed JSON in base64 returns parse error', () => {
+  const b64  = Buffer.from('not json at all').toString('base64');
+  const body = JSON.stringify({ content: b64, encoding: 'base64' });
+  const r    = parseAttributionResponse(body);
+  assert(r.found  === true);
+  assert(r.valid  === false);
+  assert(r.errors[0].includes('parse error'));
+});
+
+test('parseAttributionResponse: bad outer JSON returns parse error', () => {
+  const r = parseAttributionResponse('this is not json');
+  assert(r.found  === true);
+  assert(r.valid  === false);
+  assert(r.errors.length > 0);
+});
+
+test('parseAttributionResponse: preserves project name', () => {
+  const body = makeGitHubContentsBody(VALID_ATTR);
+  const r    = parseAttributionResponse(body);
+  assert(r.project === 'audit-test');
+});
+
+test('runBatch: runs all tasks', async () => {
+  const results = await runBatch([
+    () => Promise.resolve(1),
+    () => Promise.resolve(2),
+    () => Promise.resolve(3),
+    () => Promise.resolve(4),
+    () => Promise.resolve(5),
+    () => Promise.resolve(6),
+  ], 3);
+  assert(results.length === 6);
+  assert(results[0] === 1 && results[5] === 6);
+});
+
+test('runBatch: batch size 1 still runs all tasks', async () => {
+  const log = [];
+  await runBatch([
+    () => Promise.resolve(log.push('a')),
+    () => Promise.resolve(log.push('b')),
+    () => Promise.resolve(log.push('c')),
+  ], 1);
+  assert(log.join('') === 'abc');
+});
+
+test('runBatch: empty task array returns empty results', async () => {
+  const r = await runBatch([], 5);
+  assert(Array.isArray(r) && r.length === 0);
+});
+
 // ── Summary ───────────────────────────────────────────────────────────────
 
-console.log();
-console.log('─'.repeat(40));
-if (failed === 0) {
-  console.log(`\x1b[92m${passed} tests passed\x1b[0m`);
-  process.exit(0);
-} else {
-  console.log(`\x1b[91m${failed} failed\x1b[0m  \x1b[92m${passed} passed\x1b[0m`);
-  process.exit(1);
-}
+Promise.all(asyncTests).then(() => {
+  console.log();
+  console.log('─'.repeat(40));
+  if (failed === 0) {
+    console.log(`\x1b[92m${passed} tests passed\x1b[0m`);
+    process.exit(0);
+  } else {
+    console.log(`\x1b[91m${failed} failed\x1b[0m  \x1b[92m${passed} passed\x1b[0m`);
+    process.exit(1);
+  }
+});

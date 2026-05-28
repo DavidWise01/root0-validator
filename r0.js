@@ -14,6 +14,7 @@
 //   r0 abd <A> [B] <C>           ABD Law Engine — anchor · witness · law
 //   r0 badge [dir]               generate attribution badge for a project
 //   r0 register <sha> <name>     register a known hash to ~/.r0-registry.json
+//   r0 audit [username]          GitHub attribution coverage report
 //   r0 whoami                    print ROOT0 framework identity
 //   r0 help                      show this help
 
@@ -28,6 +29,7 @@ const { scanDir }                                   = require('./lib/scan');
 const { evaluateABD, tritStr }                      = require('./lib/abd');
 const { markdownBadge, htmlBadge, asciiBadge, summariseBadge } = require('./lib/badge');
 const { registerHash, listRegistry, REGISTRY_PATH } = require('./lib/register');
+const { runAudit }                                  = require('./lib/audit');
 
 // ── ANSI colours (graceful fallback if not a TTY) ─────────────────────────
 const isTTY = process.stdout.isTTY;
@@ -287,6 +289,7 @@ function cmdHelp() {
   console.log(`  ${c.cyan('r0 abd')}       ${c.dim('<A> [B] <C>')}     ABD Law Engine — anchor · witness · law`);
   console.log(`  ${c.cyan('r0 badge')}     ${c.dim('[dir]')}           generate attribution badge for a project`);
   console.log(`  ${c.cyan('r0 register')}  ${c.dim('<sha> <name>')}    register a known hash to ~/.r0-registry.json`);
+  console.log(`  ${c.cyan('r0 audit')}     ${c.dim('[username]')}      GitHub attribution coverage report`);
   console.log(`  ${c.cyan('r0 help')}                     show this help`);
   console.log();
   console.log(c.bold('Examples'));
@@ -301,6 +304,10 @@ function cmdHelp() {
   console.log(`  ${c.dim('r0 abd "shadow" "doubt" "law"')}`);
   console.log(`  ${c.dim('r0 badge ./my-project')}`);
   console.log(`  ${c.dim('r0 register 02880745b847... "STOICHEION v12.0"')}`);
+  console.log(`  ${c.dim('r0 audit')}`);
+  console.log(`  ${c.dim('r0 audit DavidWise01')}`);
+  console.log(`  ${c.dim('r0 audit DavidWise01 --token ghp_xxx')}`);
+  console.log(`  ${c.dim('r0 audit --json > coverage.json')}`);
   console.log();
   console.log(c.bold('Exit codes'));
   console.log(`  ${c.mint('0')}  valid / match / covered`);
@@ -627,6 +634,139 @@ function cmdBadge(target) {
   console.log();
 }
 
+// audit [username] [--token <PAT>] [--json] [--include-forks] [--include-archived]
+async function cmdAudit(rawArgs) {
+  // Parse flags out of args
+  let username        = null;
+  let token           = process.env.GITHUB_TOKEN || null;
+  let jsonMode        = false;
+  let includeForks    = false;
+  let includeArchived = false;
+
+  for (let i = 0; i < rawArgs.length; i++) {
+    const a = rawArgs[i];
+    if (a === '--json')              { jsonMode        = true; }
+    else if (a === '--forks')        { includeForks    = true; }
+    else if (a === '--archived')     { includeArchived = true; }
+    else if (a === '--token')        { token = rawArgs[++i]; }
+    else if (a.startsWith('--token=')) { token = a.split('=')[1]; }
+    else if (!a.startsWith('-'))     { username = a; }
+  }
+
+  username = username || 'DavidWise01';
+
+  if (!jsonMode) {
+    header(`r0 audit  ${username}`);
+    console.log();
+    if (token) {
+      console.log(c.dim('  Authenticated — using token (5000 req/hr limit)'));
+    } else {
+      console.log(c.dim('  Unauthenticated — 60 req/hr limit. Set GITHUB_TOKEN or pass --token <PAT> for more.'));
+    }
+    console.log(c.dim('  Fetching repos...'));
+    console.log();
+  }
+
+  let audit;
+  try {
+    audit = await runAudit(username, token);
+  } catch (e) {
+    if (jsonMode) {
+      console.log(JSON.stringify({ error: e.message }));
+    } else {
+      console.error(`${FAIL}  ${c.red(e.message)}`);
+    }
+    process.exit(2);
+  }
+
+  // Filter forks / archived if not requested
+  let results = audit.results;
+  if (!includeForks)    results = results.filter(r => !r.fork);
+  if (!includeArchived) results = results.filter(r => !r.archived);
+
+  const covered = results.filter(r => r.found && r.valid).length;
+  const invalid = results.filter(r => r.found && !r.valid).length;
+  const missing = results.filter(r => !r.found).length;
+  const total   = results.length;
+  const pct     = total > 0 ? Math.round((covered / total) * 100) : 0;
+
+  // ── JSON output ──────────────────────────────────────────────────────────
+  if (jsonMode) {
+    console.log(JSON.stringify({ username, total, covered, invalid, missing, pct, results }, null, 2));
+    process.exit(covered === total ? 0 : 1);
+    return;
+  }
+
+  // ── Terminal output ──────────────────────────────────────────────────────
+  if (total === 0) {
+    console.log(c.gold(`  No repos found for ${username}`));
+    console.log();
+    process.exit(0);
+  }
+
+  // Sort: valid first, then invalid, then missing
+  const sorted = [
+    ...results.filter(r => r.found && r.valid),
+    ...results.filter(r => r.found && !r.valid),
+    ...results.filter(r => !r.found),
+  ];
+
+  sorted.forEach(r => {
+    const name = r.repo.padEnd(44);
+    if (r.error && !r.found) {
+      console.log(`${WARN}  ${name} ${c.gold('API error')} ${c.dim('— ' + r.error)}`);
+    } else if (!r.found) {
+      console.log(`${FAIL}  ${name} ${c.dim('no .attribution')}`);
+    } else if (!r.valid) {
+      const errSnip = (r.errors || [])[0] || 'invalid';
+      console.log(`${WARN}  ${name} ${c.gold('.attribution INVALID')} ${c.dim('— ' + errSnip)}`);
+    } else {
+      const proj = r.project ? c.dim(` (${r.project})`) : '';
+      console.log(`${PASS}  ${name} ${c.dim('.attribution valid')}${proj}`);
+    }
+  });
+
+  console.log();
+  rule();
+
+  // Summary line
+  const pctStr = `${pct}%`;
+  const summaryColor = covered === total ? c.mint : (missing > 0 ? c.red : c.gold);
+  const summaryText  = covered === total
+    ? `${covered}/${total} covered (${pctStr})  ✓`
+    : missing > 0
+      ? `${covered}/${total} covered (${pctStr}) — ${missing} missing, ${invalid} invalid`
+      : `${covered}/${total} covered (${pctStr}) — ${invalid} invalid`;
+
+  console.log(`  Attribution coverage: ${summaryColor(summaryText)}`);
+
+  // Rate limit info
+  if (audit.rateInfo) {
+    const { remaining, resetDate } = audit.rateInfo;
+    const resetStr = resetDate ? `  resets ${resetDate.replace('T', ' ').slice(0,19)} UTC` : '';
+    console.log(c.dim(`  GitHub API: ${remaining} requests remaining${resetStr}`));
+  }
+
+  // Skipped info
+  const skippedForks    = audit.results.filter(r => r.fork).length;
+  const skippedArchived = audit.results.filter(r => r.archived && !r.fork).length;
+  if (skippedForks > 0 || skippedArchived > 0) {
+    const parts = [];
+    if (skippedForks    > 0) parts.push(`${skippedForks} fork${skippedForks !== 1 ? 's' : ''}`);
+    if (skippedArchived > 0) parts.push(`${skippedArchived} archived`);
+    console.log(c.dim(`  Skipped: ${parts.join(', ')} (use --forks --archived to include)`));
+  }
+
+  if (missing > 0) {
+    console.log();
+    console.log(c.dim(`  Run r0 init in each missing repo directory to scaffold .attribution files.`));
+    console.log(c.dim(`  Run r0 badge <dir> after to generate README badges.`));
+  }
+  console.log();
+
+  process.exit(covered === total ? 0 : 1);
+}
+
 // register <sha> <name> [notes...]
 function cmdRegister(sha, name, ...notes) {
   if (!sha || !name) {
@@ -680,6 +820,7 @@ switch (cmd) {
   case 'abd':       cmdAbd(args);                              break;
   case 'badge':     cmdBadge(args[0]);                         break;
   case 'register':  cmdRegister(args[0], args[1], ...args.slice(2)); break;
+  case 'audit':     cmdAudit(args);                            break;
   case 'help':
   case '--help':
   case '-h':        cmdHelp();                                 break;
