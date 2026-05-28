@@ -8,15 +8,20 @@
 //   r0 validate <file|dir>    validate .attribution file(s)
 //   r0 sha <file> [hash]      compute or verify SHA256
 //   r0 ternary                print ternary spec constants
+//   r0 init [dir]             scaffold a new .attribution file
+//   r0 scan [dir]             find projects missing .attribution
+//   r0 ladder [n]             doubt ladder analysis
 //   r0 whoami                 print ROOT0 framework identity
 //   r0 help                   show this help
 
 const fs   = require('fs');
 const path = require('path');
 
-const { validateAttribution }      = require('./lib/attribution');
-const { computeSHA256, checkSHA256, KNOWN_HASHES } = require('./lib/sha');
-const { SPEC, stateCount }         = require('./lib/ternary');
+const { validateAttribution }                       = require('./lib/attribution');
+const { computeSHA256, checkSHA256, KNOWN_HASHES }  = require('./lib/sha');
+const { SPEC, stateCount }                          = require('./lib/ternary');
+const { runInit }                                   = require('./lib/init');
+const { scanDir }                                   = require('./lib/scan');
 
 // ── ANSI colours (graceful fallback if not a TTY) ─────────────────────────
 const isTTY = process.stdout.isTTY;
@@ -270,14 +275,19 @@ function cmdHelp() {
   console.log(`  ${c.cyan('r0 sha')}      ${c.dim('<file> [hash]')} compute or verify SHA256`);
   console.log(`  ${c.cyan('r0 ternary')}               print ROOT0 ternary spec constants`);
   console.log(`  ${c.cyan('r0 whoami')}                print ROOT0 framework identity`);
+  console.log(`  ${c.cyan('r0 init')}     ${c.dim('[dir]')}         scaffold a new .attribution file`);
+  console.log(`  ${c.cyan('r0 scan')}     ${c.dim('[dir]')}         find projects missing .attribution`);
+  console.log(`  ${c.cyan('r0 ladder')}   ${c.dim('[rung]')}        doubt ladder analysis (all or specific rung)`);
   console.log(`  ${c.cyan('r0 help')}                  show this help`);
   console.log();
   console.log(c.bold('Examples'));
   console.log(`  ${c.dim('r0 validate .attribution')}`);
   console.log(`  ${c.dim('r0 validate ./my-project')}`);
   console.log(`  ${c.dim('r0 sha stoicheion.pdf 02880745b847...')}`);
-  console.log(`  ${c.dim('r0 sha any-file.pdf')}`);
-  console.log(`  ${c.dim('r0 ternary')}`);
+  console.log(`  ${c.dim('r0 init')}`);
+  console.log(`  ${c.dim('r0 scan "C:/Davids files"')}`);
+  console.log(`  ${c.dim('r0 ladder 5')}`);
+  console.log(`  ${c.dim('r0 ladder')}`);
   console.log();
   console.log(c.bold('Exit codes'));
   console.log(`  ${c.mint('0')}  valid / match`);
@@ -288,18 +298,196 @@ function cmdHelp() {
   console.log();
 }
 
+// init [dir]
+async function cmdInit(dir) {
+  header('r0 init  .attribution scaffold');
+  await runInit(dir);
+}
+
+// scan [dir]
+function cmdScan(target) {
+  const abs = path.resolve(target || '.');
+  header(`r0 scan  ${abs}`);
+  console.log();
+
+  if (!fs.existsSync(abs)) {
+    console.error(c.red(`Error: not found — ${abs}`));
+    process.exit(2);
+  }
+
+  console.log(c.dim('  Scanning for projects...'));
+  console.log();
+
+  const results = scanDir(abs);
+
+  if (results.length === 0) {
+    console.log(c.gold('  No project directories found.'));
+    console.log(c.dim('  Projects are detected by presence of .git, package.json, README.md, index.html, etc.'));
+    console.log();
+    process.exit(0);
+  }
+
+  let covered = 0, missing = 0, invalid = 0;
+
+  results.forEach(r => {
+    const name = r.name.padEnd(46);
+    if (!r.found) {
+      console.log(`${FAIL}  ${name} ${c.dim('no .attribution')}`);
+      missing++;
+    } else if (!r.valid) {
+      console.log(`${WARN}  ${name} ${c.gold('.attribution INVALID')} ${c.dim('— ' + r.errors[0])}`);
+      invalid++;
+    } else {
+      console.log(`${PASS}  ${name} ${c.dim('.attribution valid')}`);
+      covered++;
+    }
+  });
+
+  const total = results.length;
+  console.log();
+  rule();
+
+  const pct    = Math.round((covered / total) * 100);
+  const status = covered === total
+    ? c.mint(`${covered}/${total} covered (${pct}%)`)
+    : missing > 0
+      ? c.red(`${covered}/${total} covered (${pct}%) — ${missing} missing`)
+      : c.gold(`${covered}/${total} covered — ${invalid} invalid`);
+
+  console.log(`  Attribution coverage: ${status}`);
+
+  if (missing > 0) {
+    console.log(c.dim(`\n  Run r0 init in each missing directory to scaffold .attribution files.`));
+  }
+  console.log();
+
+  process.exit(covered === total ? 0 : 1);
+}
+
+// ladder [n]
+function cmdLadder(rungArg) {
+  const RUNGS = SPEC.ladder;
+  const RUNG_DATA = SPEC.rungs;
+
+  // No arg — print compact summary of all rungs
+  if (!rungArg) {
+    header('r0 ladder  ROOT0 Doubt Ladder — all rungs');
+    console.log();
+    console.log(`  ${c.dim('Primitive:')} ${c.cyan('0 . 0')}  ${c.dim('(left | witness | right)')}`);
+    console.log(`  ${c.dim('Formula:')}  ${c.cyan('states = 3^n')}  ${c.dim('(odd n only)')}`);
+    console.log();
+
+    RUNGS.forEach((n, i) => {
+      const r      = RUNG_DATA[n];
+      const prev   = i > 0 ? RUNG_DATA[RUNGS[i-1]] : null;
+      const states = stateCount(n).toLocaleString().padStart(8);
+      const arrow  = i < RUNGS.length - 1 ? c.dim(' →') : c.dim('  ');
+      console.log(
+        `  ${c.gold('Rung ' + String(n).padEnd(2))}` +
+        `  ${c.cyan(r.mode.padEnd(14))}` +
+        `  ${c.mint(states)} states` +
+        arrow
+      );
+      console.log(`          ${c.dim(r.meaning)}`);
+      if (i < RUNGS.length - 1) console.log();
+    });
+
+    console.log();
+    console.log(`  ${c.dim('Safe ground:')} ${c.mint('000|1')}  ${c.dim('three witnesses → gate → one signal')}`);
+    console.log(`  ${c.dim('Bad collapse:')} ${c.red('00 00')}  ${c.dim('no gate, no remainder')}`);
+    console.log(`  ${c.dim('Genesis:')}     ${c.cyan('1 = 0 = 1')}  ${c.dim('rung 11 is not the end — it repeats')}`);
+    console.log();
+    return;
+  }
+
+  // Specific rung
+  const n = parseInt(rungArg, 10);
+  if (!RUNGS.includes(n)) {
+    console.error(c.red(`Error: rung must be one of ${RUNGS.join(', ')}`));
+    process.exit(2);
+  }
+
+  const r      = RUNG_DATA[n];
+  const idx    = RUNGS.indexOf(n);
+  const prev   = idx > 0 ? { n: RUNGS[idx-1], ...RUNG_DATA[RUNGS[idx-1]] } : null;
+  const next   = idx < RUNGS.length - 1 ? { n: RUNGS[idx+1], ...RUNG_DATA[RUNGS[idx+1]] } : null;
+  const states = stateCount(n);
+
+  header(`r0 ladder  Rung ${n} — ${r.mode}`);
+  console.log();
+
+  console.log(`  ${c.dim('Rung:    ')} ${c.gold(n)}`);
+  console.log(`  ${c.dim('Mode:    ')} ${c.cyan(r.mode)}`);
+  console.log(`  ${c.dim('States:  ')} ${c.mint(states.toLocaleString())}  ${c.dim(`(3^${n})`)}`);
+  console.log(`  ${c.dim('Meaning: ')} ${r.meaning}`);
+  console.log();
+
+  // Progression
+  console.log(c.bold('  Progression'));
+  RUNGS.forEach(rn => {
+    const rd     = RUNG_DATA[rn];
+    const sc     = stateCount(rn).toLocaleString().padStart(8);
+    const marker = rn === n ? c.mint(' ← you are here') : '';
+    const line   = `  ${String(rn).padEnd(3)} ${rd.mode.padEnd(14)} ${sc} states${marker}`;
+    console.log(rn === n ? c.mint(line) : c.dim(line));
+  });
+  console.log();
+
+  // Trit breakdown
+  console.log(c.bold('  Trit breakdown'));
+  console.log(`  ${n} trit positions × 3 states = 3^${n} = ${states.toLocaleString()} unique configurations`);
+  console.log();
+
+  // What happens at this rung
+  console.log(c.bold('  At this rung'));
+  const meanings = {
+    1:  '  The single quantum of doubt. One dot that can choose n1, p0, or p1.\n  This is the seed — the minimal unit of the ternary system.',
+    3:  '  The first triword: left | witness | right.\n  Communication becomes possible. 27 distinct messages can be sent.',
+    5:  '  Enough witnesses to distinguish signal from noise.\n  Collect all three positions of three triwords. Sort before sending.',
+    7:  '  Send scouts to probe ahead while keeping a core safe.\n  The system has enough state space to operate in two modes simultaneously.',
+    9:  '  Full 3×3 broadcast plane. Every triword talks to every other.\n  Propagation is now complete — all nodes receive the signal.',
+    11: '  Scouts return with data. The loop closes.\n  REPEAT is not termination — it is the cycle completing and beginning again.',
+  };
+  console.log(meanings[n] || '  (no detail available)');
+  console.log();
+
+  // Transitions
+  if (prev) {
+    const factor = Math.round(states / stateCount(prev.n));
+    console.log(c.bold('  From previous rung'));
+    console.log(`  Rung ${prev.n} (${prev.mode}) → Rung ${n}: ×${factor} expansion`);
+    console.log(`  ${stateCount(prev.n).toLocaleString()} → ${states.toLocaleString()} states`);
+    console.log();
+  }
+  if (next) {
+    const factor = Math.round(stateCount(next.n) / states);
+    console.log(c.bold('  Next rung'));
+    console.log(`  Rung ${n} → Rung ${next.n} (${next.mode}): ×${factor} expansion`);
+    console.log(`  ${states.toLocaleString()} → ${stateCount(next.n).toLocaleString()} states`);
+    console.log(`  ${c.dim('Add ' + (next.n - n) + ' witness positions to advance.')}`);
+    console.log();
+  } else {
+    console.log(c.dim('  Rung 11 is the final rung. After REPEAT, the cycle returns to Rung 1.'));
+    console.log(`  ${c.dim('1 = 0 = 1')}`);
+    console.log();
+  }
+}
+
 // ── MAIN ──────────────────────────────────────────────────────────────────
 
 const [,, cmd, ...args] = process.argv;
 
 switch (cmd) {
-  case 'validate': cmdValidate(args[0]);       break;
-  case 'sha':      cmdSha(args[0], args[1]);   break;
-  case 'ternary':  cmdTernary();               break;
-  case 'whoami':   cmdWhoami();                break;
+  case 'validate': cmdValidate(args[0]);         break;
+  case 'sha':      cmdSha(args[0], args[1]);     break;
+  case 'ternary':  cmdTernary();                 break;
+  case 'whoami':   cmdWhoami();                  break;
+  case 'init':     cmdInit(args[0]);             break;
+  case 'scan':     cmdScan(args[0]);             break;
+  case 'ladder':   cmdLadder(args[0]);           break;
   case 'help':
   case '--help':
-  case '-h':       cmdHelp();                  break;
+  case '-h':       cmdHelp();                    break;
   default:
     if (!cmd) {
       cmdHelp();

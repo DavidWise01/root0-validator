@@ -3,8 +3,13 @@
 // ROOT0 Validator — test suite
 // Run: node test.js
 
-const { validateAttribution }   = require('./lib/attribution');
-const { not, and, or, resolve } = require('./lib/ternary');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const { validateAttribution }              = require('./lib/attribution');
+const { not, and, or, resolve, stateCount, SPEC } = require('./lib/ternary');
+const { scanDir, hasAttribution }          = require('./lib/scan');
 
 let passed = 0, failed = 0;
 
@@ -174,6 +179,127 @@ test('resolve: 4 zeros no gate = 00 00 bad', () => {
   const r = resolve([0, 0, 0, 0]);
   assert(r.safe === false, 'should be bad collapse');
   assert(r.result === '00 00');
+});
+
+// ── Doubt Ladder / stateCount tests ──────────────────────────────────────
+
+test('stateCount(1) = 3', ()  => { assert(stateCount(1)  === 3); });
+test('stateCount(3) = 27', () => { assert(stateCount(3)  === 27); });
+test('stateCount(5) = 243', () => { assert(stateCount(5) === 243); });
+test('stateCount(7) = 2187', () => { assert(stateCount(7) === 2187); });
+test('stateCount(9) = 19683', () => { assert(stateCount(9) === 19683); });
+test('stateCount(11) = 177147', () => { assert(stateCount(11) === 177147); });
+
+test('SPEC.ladder has exactly 6 rungs', () => {
+  assert(Array.isArray(SPEC.ladder));
+  assert(SPEC.ladder.length === 6, `expected 6, got ${SPEC.ladder.length}`);
+});
+
+test('SPEC.ladder values are [1,3,5,7,9,11]', () => {
+  const expected = [1, 3, 5, 7, 9, 11];
+  expected.forEach((n, i) => {
+    assert(SPEC.ladder[i] === n, `index ${i}: expected ${n}, got ${SPEC.ladder[i]}`);
+  });
+});
+
+test('all rungs have mode and meaning', () => {
+  SPEC.ladder.forEach(n => {
+    const r = SPEC.rungs[n];
+    assert(r && typeof r.mode === 'string' && r.mode.length > 0, `rung ${n} missing mode`);
+    assert(r && typeof r.meaning === 'string' && r.meaning.length > 0, `rung ${n} missing meaning`);
+  });
+});
+
+test('3^n growth: each rung is 9× the previous', () => {
+  for (let i = 1; i < SPEC.ladder.length; i++) {
+    const prev = stateCount(SPEC.ladder[i - 1]);
+    const curr = stateCount(SPEC.ladder[i]);
+    assert(curr === prev * 9, `rung ${SPEC.ladder[i]}: expected ${prev * 9}, got ${curr}`);
+  }
+});
+
+// ── Scan tests ────────────────────────────────────────────────────────────
+
+function withTempDir(fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r0-test-'));
+  try { fn(dir); }
+  finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('hasAttribution: returns found:false when no file', () => {
+  withTempDir(dir => {
+    const r = hasAttribution(dir);
+    assert(r.found === false, 'expected found:false');
+  });
+});
+
+test('hasAttribution: returns found:true + valid:false for bad JSON', () => {
+  withTempDir(dir => {
+    fs.writeFileSync(path.join(dir, '.attribution'), 'not json', 'utf8');
+    const r = hasAttribution(dir);
+    assert(r.found === true, 'expected found:true');
+    assert(r.valid === false, 'expected valid:false');
+    assert(r.errors.length > 0, 'expected at least one error');
+  });
+});
+
+test('hasAttribution: returns found:true + valid:true for valid file', () => {
+  withTempDir(dir => {
+    const obj = {
+      format: 'ROOT0-ATTRIBUTION-v1.0',
+      project: 'scan-test',
+      law: 'Both work. Both fair.',
+      contributors: [
+        { name: 'ROOT0', substrate: 'human', role: 'architect', contribution: 'intent · direction' },
+      ],
+    };
+    fs.writeFileSync(path.join(dir, '.attribution'), JSON.stringify(obj), 'utf8');
+    const r = hasAttribution(dir);
+    assert(r.found === true, 'expected found:true');
+    assert(r.valid === true, `expected valid:true — errors: ${(r.errors || []).join(', ')}`);
+  });
+});
+
+test('scanDir: detects project dir with package.json', () => {
+  withTempDir(rootDir => {
+    const proj = path.join(rootDir, 'my-project');
+    fs.mkdirSync(proj);
+    fs.writeFileSync(path.join(proj, 'package.json'), '{}', 'utf8');
+    const results = scanDir(rootDir);
+    assert(results.length === 1, `expected 1 project, got ${results.length}`);
+    assert(results[0].found === false, 'should have no .attribution');
+  });
+});
+
+test('scanDir: project with valid .attribution is covered', () => {
+  withTempDir(rootDir => {
+    const proj = path.join(rootDir, 'good-proj');
+    fs.mkdirSync(proj);
+    fs.writeFileSync(path.join(proj, 'package.json'), '{}', 'utf8');
+    const obj = {
+      format: 'ROOT0-ATTRIBUTION-v1.0',
+      project: 'good-proj',
+      law: 'Both work. Both fair.',
+      contributors: [
+        { name: 'ROOT0', substrate: 'human', role: 'architect', contribution: 'intent' },
+      ],
+    };
+    fs.writeFileSync(path.join(proj, '.attribution'), JSON.stringify(obj), 'utf8');
+    const results = scanDir(rootDir);
+    assert(results.length === 1, `expected 1, got ${results.length}`);
+    assert(results[0].found === true, 'should find .attribution');
+    assert(results[0].valid === true, `should be valid — ${(results[0].errors || []).join(', ')}`);
+  });
+});
+
+test('scanDir: skips node_modules', () => {
+  withTempDir(rootDir => {
+    const nm = path.join(rootDir, 'node_modules', 'some-pkg');
+    fs.mkdirSync(nm, { recursive: true });
+    fs.writeFileSync(path.join(nm, 'package.json'), '{}', 'utf8');
+    const results = scanDir(rootDir);
+    assert(results.length === 0, `should skip node_modules — got ${results.length}`);
+  });
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────

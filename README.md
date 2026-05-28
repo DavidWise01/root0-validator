@@ -1,17 +1,20 @@
 # root0-validator
 
 **Author:** David Lee Wise (ROOT0) / TriPod LLC  
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **License:** CC-BY-ND-4.0 · TRIPOD-IP-v1.1  
 **No dependencies** — Node.js built-ins only.
 
-CLI validation toolkit for ROOT0 intellectual property standards.
+CLI validation toolkit for ROOT0 intellectual property standards. A rolling `-++-` repo — commands accumulate over time.
 
 ```
 r0 validate .attribution       → pass/fail with field-by-field report
 r0 sha <file> [expected-hash]  → compute or verify SHA256
 r0 ternary                     → print ternary spec constants
 r0 whoami                      → ROOT0 framework identity
+r0 init [dir]                  → scaffold a new .attribution file
+r0 scan [dir]                  → find projects missing .attribution
+r0 ladder [rung]               → doubt ladder analysis
 ```
 
 ---
@@ -106,25 +109,94 @@ Prints ROOT0 framework identity — author, STOICHEION SHA256, prior art date, Z
 ## Programmatic API
 
 ```js
-const { validateAttribution, computeSHA256, TERNARY_SPEC, trit, ladder } = require('root0-validator');
+const { validateAttribution }              = require('./lib/attribution');
+const { computeSHA256, checkSHA256 }       = require('./lib/sha');
+const { SPEC, not, and, or, resolve, stateCount } = require('./lib/ternary');
+const { scanDir, hasAttribution }          = require('./lib/scan');
+const { runInit }                          = require('./lib/init');
 
 // Validate an attribution object
 const result = validateAttribution(obj);
 // → { valid: true|false, errors: [], warnings: [], info: [] }
 
-// Compute SHA256
+// Compute / verify SHA256
 const hash = computeSHA256('./stoicheion.pdf');
+const check = checkSHA256('./stoicheion.pdf', '02880745b847...');
+// → { actual, expected, match, known, file }
 
 // Ternary operations
-const { not, and, or } = trit;
 not(-1)       // → 1  (n1 → p1)
 and(1, 0)     // → 0  (min certainty)
 or(-1, 1)     // → 1  (max certainty)
 
 // Doubt ladder
-ladder.stateCount(7)   // → 2187  (3^7)
-ladder.resolve([0,0,0,1])  // → { result: '000|1', safe: true }
-ladder.resolve([0,0,0,0])  // → { result: '00 00', safe: false }
+stateCount(7)          // → 2187  (3^7)
+resolve([0, 0, 0, 1])  // → { result: '000|1', safe: true }
+resolve([0, 0, 0, 0])  // → { result: '00 00', safe: false }
+
+// Scan
+const projects = scanDir('./my-root', 0, 3);
+// → [{ dir, name, found, valid, errors, filePath }]
+
+const attr = hasAttribution('./my-project');
+// → { found: true, valid: true, errors: [], filePath: '...' }
+```
+
+---
+
+---
+
+### `r0 init [dir]`
+
+Interactive wizard that scaffolds a `.attribution` file in the target directory (defaults to current directory). Prompts for project info, human contributor, and optional AI contributor. Press Enter to accept defaults shown in `[brackets]`.
+
+```bash
+r0 init                  # scaffold in current directory
+r0 init ./my-project     # scaffold in a specific directory
+```
+
+If `.attribution` already exists, the wizard exits cleanly and tells you to run `r0 validate` instead.
+
+---
+
+### `r0 scan [dir]`
+
+Scans a directory tree for project directories that are missing `.attribution` files. Detects projects by the presence of signal files: `.git`, `package.json`, `README.md`, `index.html`, `index.js`, `main.py`, `main.rs`, `Makefile`, `CMakeLists.txt`.
+
+```bash
+r0 scan                          # scan current directory
+r0 scan "C:/Davids files"        # scan a specific tree
+```
+
+Output:
+```
+✓  my-project                  .attribution valid
+✗  old-project                 no .attribution
+!  broken-project              .attribution INVALID — missing law field
+
+  Attribution coverage: 1/3 covered (33%) — 1 missing
+```
+
+**Exit codes:** `0` = all covered · `1` = any missing/invalid
+
+---
+
+### `r0 ladder [rung]`
+
+Prints ROOT0 Doubt Ladder analysis. With no argument, shows all 6 rungs in a compact summary. With a rung number (`1 3 5 7 9 11`), shows a full breakdown including state count, trit analysis, progression, and transitions.
+
+```bash
+r0 ladder           # all rungs — compact
+r0 ladder 7         # rung 7 — full analysis
+```
+
+```
+Rung 1   SELF             3 states  →
+Rung 3   GROUP           27 states  →
+Rung 5   COLLECT        243 states  →
+Rung 7   COLLATE/SEND  2,187 states  →
+Rung 9   PROPAGATE    19,683 states  →
+Rung 11  REPEAT      177,147 states
 ```
 
 ---
@@ -133,7 +205,7 @@ ladder.resolve([0,0,0,0])  // → { result: '00 00', safe: false }
 
 ```bash
 node test.js
-# 23 tests passed
+# 39 tests passed
 ```
 
 ---
