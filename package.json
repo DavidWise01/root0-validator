@@ -1,0 +1,32 @@
+{
+  "name": "root0-validator",
+  "version": "1.0.0",
+  "description": "ROOT0 IP validation toolkit — validates .attribution files, verifies SHA256 hashes, prints ternary spec constants.",
+  "author": "David Lee Wise (ROOT0) / TriPod LLC",
+  "license": "CC-BY-ND-4.0",
+  "bin": {
+    "r0": "./r0.js"
+  },
+  "main": "./lib/index.js",
+  "scripts": {
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": [
+    "root0",
+    "tripod",
+    "attribution",
+    "stoicheion",
+    "ternary",
+    "ip-validation",
+    "human-ai",
+    "bill-of-rights"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DavidWise01/root0-validator.git"
+  },
+  "homepage": "https://davidwise01.github.io"
+}

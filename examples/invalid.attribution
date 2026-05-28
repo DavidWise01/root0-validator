@@ -1,0 +1,20 @@
+{
+  "format": "ROOT0-ATTRIBUTION-v0.9",
+  "project": "",
+  "law": "Work is work.",
+  "contributors": [
+    {
+      "name": "Someone",
+      "substrate": "robot",
+      "role": "boss",
+      "contribution": "stuff"
+    },
+    {
+      "name": "An AI",
+      "substrate": "synthetic",
+      "role": "executor",
+      "contribution": "generation",
+      "weight": 0.8
+    }
+  ]
+}

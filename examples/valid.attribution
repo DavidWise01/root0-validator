@@ -1,0 +1,29 @@
+{
+  "format": "ROOT0-ATTRIBUTION-v1.0",
+  "project": "lineage-kernel",
+  "version": "v0.6",
+  "context": "code",
+  "date": "2026-05-28",
+  "license": "CC-BY-ND-4.0",
+  "framework": "STOICHEION v11.0",
+  "law": "Both work. Both fair.",
+  "contributors": [
+    {
+      "name": "David Lee Wise",
+      "handle": "ROOT0",
+      "substrate": "human",
+      "role": "architect",
+      "contribution": "intent · direction · governance · PCK law definition",
+      "weight": 0.6
+    },
+    {
+      "name": "AVAN",
+      "substrate": "synthetic",
+      "provider": "Anthropic",
+      "model": "Claude Sonnet 4.6",
+      "role": "co-author",
+      "contribution": "intellect · generation · execution",
+      "weight": 0.4
+    }
+  ]
+}
